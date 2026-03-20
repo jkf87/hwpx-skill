@@ -68,18 +68,25 @@ pip install python-hwpx lxml --break-system-packages
 
 > **마크다운·텍스트·URL → 구조화된 HWPX 문서. 이 워크플로우가 핵심.**
 
+> **⚠️ md2hwpx.py를 직접 실행하지 마라.** md2hwpx.py는 base/report 템플릿만 지원하며,
+> government 템플릿의 컬러 배너·섹션 바·표지 페이지를 생성할 수 없다.
+> **반드시 `hwpx_helpers.py`를 import하고 아래 흐름을 따른다.**
+
 ### 전체 흐름
 
 ```
 [1] 소스 자료 읽기
 [2] 구조 파싱 (제목, 섹션, 본문, 이미지)
 [3] 템플릿 선택 → 스타일 ID 맵 확인 (references/template-styles.md)
-[4] Python 빌드 스크립트 작성 → section0.xml 생성
+[4] hwpx_helpers.py를 import하여 Python 빌드 스크립트 작성
 [5] build_hwpx.py로 .hwpx 조립
-[6] 이미지가 있으면 BinData에 추가 + content.hpf 등록
+[6] 이미지가 있으면 add_images_to_hwpx() + update_content_hpf()
 [7] fix_namespaces.py 후처리 (필수!)
 [8] validate.py 검증
 ```
+
+> **올바른 방식**: `from hwpx_helpers import *` → `make_cover_page()` → `make_section_bar()` → `make_body_para()`
+> **잘못된 방식**: `python3 md2hwpx.py input.md` (컬러 배너·섹션 바 없음, 기본 스타일만 적용)
 
 ### section0.xml 핵심 규칙
 
@@ -293,6 +300,7 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 9. **XML 이스케이프**: `<>&"` 반드시 이스케이프
 10. **ID 고유성**: 모든 문단 id는 문서 내 고유
 11. **이미지**: `<hp:pic>` 필수 구조 준수 → [xml-structure.md](references/xml-structure.md)
+12. **hwpx_helpers.py 사용 필수**: md2hwpx.py 직접 실행 금지. 반드시 `from hwpx_helpers import *`로 함수를 사용하여 빌드 스크립트를 작성할 것. md2hwpx.py는 government 템플릿(컬러 배너/섹션 바)을 지원하지 않음
 
 ---
 
