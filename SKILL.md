@@ -77,7 +77,8 @@ pip install python-hwpx lxml --break-system-packages
 ```
 [1] 소스 자료 읽기
 [2] 구조 파싱 (제목, 섹션, 본문, 이미지)
-[3] 템플릿 선택 → 스타일 ID 맵 확인 (references/template-styles.md)
+[3] 템플릿 선택 → 해당 템플릿의 스타일 ID만 사용 (references/template-styles.md)
+    ⚠️ 템플릿 간 ID는 호환되지 않음! government charPr를 report에 쓰면 깨짐
 [4] hwpx_helpers.py를 import하여 Python 빌드 스크립트 작성
 [5] build_hwpx.py로 .hwpx 조립
 [6] 이미지가 있으면 add_images_to_hwpx() + update_content_hpf()
@@ -300,7 +301,8 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 9. **XML 이스케이프**: `<>&"` 반드시 이스케이프
 10. **ID 고유성**: 모든 문단 id는 문서 내 고유
 11. **이미지**: `<hp:pic>` 필수 구조 준수 → [xml-structure.md](references/xml-structure.md)
-12. **hwpx_helpers.py 사용 필수**: md2hwpx.py 직접 실행 금지. 반드시 `from hwpx_helpers import *`로 함수를 사용하여 빌드 스크립트를 작성할 것. md2hwpx.py는 government 템플릿(컬러 배너/섹션 바)을 지원하지 않음
+12. **템플릿 ID 호환 불가**: government charPr/paraPr/borderFill ID를 report/base 등 다른 템플릿에 사용하면 깨짐. 반드시 해당 템플릿의 ID만 사용. base charPr 3은 "16pt 제목"이 아니라 "9pt 각주"임에 주의
+13. **hwpx_helpers.py 사용 필수**: md2hwpx.py 직접 실행 금지. 반드시 `from hwpx_helpers import *`로 함수를 사용하여 빌드 스크립트를 작성할 것. md2hwpx.py는 government 템플릿(컬러 배너/섹션 바)을 지원하지 않음
 
 ---
 
