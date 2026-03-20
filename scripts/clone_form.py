@@ -82,6 +82,75 @@ def analyze(hwpx_path):
     return texts
 
 
+def auto_analyze(hwpx_path, output_json=None):
+    """양식을 분석하고 치환 맵 템플릿을 JSON으로 출력한다.
+
+    에이전트가 이 출력을 기반으로 치환 맵을 작성할 수 있도록
+    원본 텍스트를 key로, 빈 문자열을 value로 하는 JSON을 생성한다.
+
+    Args:
+        hwpx_path: 분석할 .hwpx 파일
+        output_json: 출력 JSON 경로 (None이면 stdout)
+
+    Returns:
+        dict: {structure: {...}, texts: [...], template: {...}}
+    """
+    structure = {}
+    with zipfile.ZipFile(hwpx_path, "r") as zf:
+        names = zf.namelist()
+        bindata = [n for n in names if n.startswith("BinData/")]
+        structure["zip_entries"] = len(names)
+        structure["bindata_count"] = len(bindata)
+
+        if "Contents/section0.xml" in names:
+            sec = zf.read("Contents/section0.xml").decode("utf-8")
+            structure["tables"] = len(re.findall(r"<hp:tbl ", sec))
+            structure["images"] = len(re.findall(r"<hp:pic ", sec))
+            structure["paragraphs"] = len(re.findall(r"<hp:p ", sec))
+            structure["runs"] = len(re.findall(r"<hp:run ", sec))
+            structure["section_size"] = len(sec)
+
+    texts = extract_texts(hwpx_path)
+
+    # 워크플로우 추천
+    has_tables = structure.get("tables", 0) > 0
+    has_images = structure.get("images", 0) > 0
+    if has_tables or has_images:
+        recommendation = "Workflow F (clone_form.py) — 테이블/이미지 포함, 양식 복제 필수"
+    else:
+        recommendation = "Workflow C 또는 F 가능 — 단순 텍스트 문서"
+
+    # 치환 맵 템플릿 생성
+    template = {}
+    for t in texts:
+        if len(t) > 1:  # 1글자 이하 건너뜀
+            template[t] = ""
+
+    result = {
+        "source": hwpx_path,
+        "structure": structure,
+        "recommendation": recommendation,
+        "text_count": len(texts),
+        "template_map": template,
+    }
+
+    output = json.dumps(result, ensure_ascii=False, indent=2)
+
+    if output_json:
+        with open(output_json, "w", encoding="utf-8") as f:
+            f.write(output)
+        print(f"자동 분석 완료: {output_json}")
+        print(f"  구조: 테이블 {structure.get('tables', 0)}개, "
+              f"이미지 {structure.get('images', 0)}개, "
+              f"문단 {structure.get('paragraphs', 0)}개")
+        print(f"  텍스트 조각: {len(texts)}개")
+        print(f"  추천: {recommendation}")
+    else:
+        print(output)
+
+    return result
+
+
 def _prepare_keywords(keywords):
     """키워드를 길이 내림차순으로 정렬한다 (긴 것이 먼저 매칭되도록)."""
     return sorted(keywords.items(), key=lambda x: len(x[0]), reverse=True)
@@ -251,6 +320,7 @@ def main():
     parser.add_argument("source", help="원본 HWPX 파일")
     parser.add_argument("output", nargs="?", help="출력 HWPX 파일")
     parser.add_argument("--analyze", action="store_true", help="양식 분석 모드")
+    parser.add_argument("--auto-analyze", metavar="JSON", help="자동 분석 + 치환 맵 템플릿 JSON 출력")
     parser.add_argument("--map", help="구문 치환 JSON 파일 (Phase 1)")
     parser.add_argument("--keywords", help="키워드 치환 JSON 파일 (Phase 2)")
     parser.add_argument("--replace", nargs="*", help="CLI 치환 쌍 (old=new)")
@@ -267,6 +337,11 @@ def main():
     # 분석 모드
     if args.analyze:
         analyze(args.source)
+        return
+
+    # 자동 분석 모드
+    if args.auto_analyze:
+        auto_analyze(args.source, args.auto_analyze)
         return
 
     # 복제 모드

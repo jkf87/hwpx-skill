@@ -20,6 +20,7 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── validate.py            # HWPX 구조 검증
 │   ├── analyze_template.py    # HWPX 심층 분석
 │   ├── clone_form.py           # ★ 양식 복제 (Workflow F)
+│   ├── verify_hwpx.py         # ★ 서브에이전트 검수 도구
 │   ├── text_extract.py        # 텍스트 추출
 │   ├── md2hwpx.py             # 마크다운→HWPX 자동 변환
 │   └── office/{unpack,pack}.py
@@ -63,6 +64,27 @@ pip install python-hwpx lxml --break-system-packages
  ├─ "이 양식 복제해서 내용 바꿔줘" → 워크플로우 F (양식 복제) ★
  └─ "HWPX 읽어줘" → 워크플로우 E (읽기/추출)
 ```
+
+### ⚠️ 자동 판별 규칙 (사용자가 양식 파일을 제공한 경우)
+
+> **사용자가 `.hwpx` 파일을 주고 "이걸로 테스트", "내용 바꿔줘", "이 양식으로" 등을 요청하면
+> 먼저 `clone_form.py --analyze`로 구조를 확인한다.**
+
+```
+양식 분석 결과
+ ├─ 테이블 ≥ 1개 또는 이미지 ≥ 1개 → 워크플로우 F (양식 복제) ★★★
+ ├─ 테이블 0개, 이미지 0개, 단순 텍스트 → 워크플로우 C 또는 D 가능
+ └─ 판단 불가 → 워크플로우 F를 기본으로 사용 (가장 안전)
+```
+
+> **절대 하지 말 것:**
+> - `<hp:t>` 노드를 순차적으로 새 텍스트로 덮어쓰기 — **런(run) 소실, 서식 파괴**
+> - lxml로 텍스트 노드를 직접 조작 — **네임스페이스/속성 손실 위험**
+> - 새 section0.xml을 처음부터 작성 (Workflow A/D) — **구조 97.5% 손실**
+>
+> **반드시 할 것:**
+> - `clone_form.py`의 `clone()` 함수 또는 ZIP-level 문자열 치환 사용
+> - 치환은 `str.replace()` 기반으로 XML 구조를 건드리지 않음
 
 ---
 
@@ -343,6 +365,56 @@ print(f"커버리지: {result['coverage_pct']:.1f}%")
 
 ---
 
+## 서브에이전트 검수 (★ 권장)
+
+> **문서 생성 후 별도 서브에이전트를 생성하여 품질 검증을 수행한다.**
+> 생성 에이전트와 검수 에이전트를 분리하면 실수를 줄일 수 있다.
+
+### 검수 도구
+
+```bash
+# 원본과 비교 검수 (구조 보존 확인)
+python3 "${CLAUDE_SKILL_DIR}/scripts/verify_hwpx.py" \
+  --source original.hwpx --result output.hwpx
+
+# 단독 검수 (XML 유효성 + 구조 체크)
+python3 "${CLAUDE_SKILL_DIR}/scripts/verify_hwpx.py" --result output.hwpx
+
+# JSON 리포트 출력 (자동화용)
+python3 "${CLAUDE_SKILL_DIR}/scripts/verify_hwpx.py" \
+  --source original.hwpx --result output.hwpx --json report.json
+```
+
+### 검수 항목
+
+| 검사 | 내용 | FAIL 조건 |
+|------|------|-----------|
+| mimetype | 첫 엔트리 + ZIP_STORED | 위치·압축 불일치 |
+| 필수 파일 | header.xml, section0.xml 등 | 누락 시 |
+| XML 유효성 | 모든 XML 파싱 가능 | 파싱 오류 |
+| 런 보존 | 원본 대비 런(run) 수 | **감소 시 FAIL** |
+| 테이블·이미지 | 원본 대비 수량 | 감소 시 FAIL |
+| section 크기 | 원본 대비 비율 | 50% 미만 시 FAIL |
+
+### 서브에이전트 워크플로우 예시
+
+```
+[메인 에이전트]
+  1. clone_form.py로 문서 생성
+  2. fix_namespaces.py 후처리
+  ↓
+[검수 서브에이전트 생성]
+  3. verify_hwpx.py --source --result 실행
+  4. text_extract.py로 텍스트 추출 확인
+  5. PASS/FAIL 리포트 반환
+  ↓
+[메인 에이전트]
+  6. FAIL이면 수정 후 재검수
+  7. PASS이면 사용자에게 전달
+```
+
+---
+
 ## 네임스페이스 후처리 (★ 필수)
 
 > **⚠️ 빠뜨리면 한글 Viewer에서 빈 페이지로 표시된다!**
@@ -389,6 +461,8 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 11. **이미지**: `<hp:pic>` 필수 구조 준수 → [xml-structure.md](references/xml-structure.md)
 12. **템플릿 ID 호환 불가**: government charPr/paraPr/borderFill ID를 report/base 등 다른 템플릿에 사용하면 깨짐. 반드시 해당 템플릿의 ID만 사용. base charPr 3은 "16pt 제목"이 아니라 "9pt 각주"임에 주의
 13. **hwpx_helpers.py 사용 필수**: md2hwpx.py 직접 실행 금지. 반드시 `from hwpx_helpers import *`로 함수를 사용하여 빌드 스크립트를 작성할 것. md2hwpx.py는 government 템플릿(컬러 배너/섹션 바)을 지원하지 않음
+14. **양식 복제 시 Workflow F 필수**: 사용자가 `.hwpx` 양식을 제공하고 내용 변경을 요청하면 `clone_form.py` 사용. 절대로 `<hp:t>` 노드를 순차 덮어쓰기하거나 lxml로 텍스트를 직접 조작하지 말 것 (런 소실·서식 파괴 원인)
+15. **서브에이전트 검수 권장**: 문서 생성 후 별도 서브에이전트로 `validate.py` + `text_extract.py` + 구조 비교를 실행하여 품질 검증
 
 ---
 
