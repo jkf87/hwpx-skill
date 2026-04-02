@@ -1,6 +1,6 @@
 ---
 name: hwpx
-description: "HWPX 문서(.hwpx) 생성·읽기·편집 통합 스킬. '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서' 등의 키워드 시 반드시 사용. 마크다운·텍스트·URL 자료를 HWPX 문서로 변환하는 '콘텐츠→문서화' 워크플로우와 템플릿 치환 워크플로우를 지원한다."
+description: "HWP/HWPX 문서(.hwp, .hwpx) 생성·변환·읽기·편집 통합 스킬. 'HWP 변환', 'hwp를 hwpx로', '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서' 등의 키워드 시 반드시 사용. HWP→HWPX 변환, 마크다운·텍스트·URL→HWPX 변환, 템플릿 치환 워크플로우를 지원한다."
 allowed-tools: Bash(python3 *), Read, Write, Glob, Grep
 ---
 
@@ -15,6 +15,7 @@ ${CLAUDE_SKILL_DIR}/
 ├── SKILL.md
 ├── scripts/
 │   ├── hwpx_helpers.py        # ★ 헬퍼 라이브러리 (배너/섹션바/이미지/빌드 함수)
+│   ├── convert_hwp.py         # ★ HWP→HWPX 변환 (Workflow H)
 │   ├── build_hwpx.py          # 템플릿+XML → .hwpx 조립
 │   ├── fix_namespaces.py      # ★ 필수: 네임스페이스 후처리
 │   ├── validate.py            # HWPX 구조 검증
@@ -48,6 +49,8 @@ ${CLAUDE_SKILL_DIR}/
 
 ```bash
 pip install python-hwpx lxml --break-system-packages
+# HWP→HWPX 변환 (Workflow H) 추가 의존성:
+pip install pyhwp5 olefile --break-system-packages
 ```
 
 ---
@@ -58,6 +61,7 @@ pip install python-hwpx lxml --break-system-packages
 
 ```
 사용자 요청
+ ├─ ".hwp 파일 → .hwpx 변환" → 워크플로우 H (HWP→HWPX 변환) ★★
  ├─ "마크다운/텍스트/URL → HWPX" → 워크플로우 A (콘텐츠→HWPX)
  ├─ "양식에 내용 채워줘" → 워크플로우 B (템플릿 치환)
  ├─ "HWPX 수정해줘" → 워크플로우 C (기존 문서 편집)
@@ -65,6 +69,20 @@ pip install python-hwpx lxml --break-system-packages
  ├─ "이 양식 복제해서 내용 바꿔줘" → 워크플로우 F (양식 복제) ★
  ├─ "공문 작성해줘/공문서 검수해줘" → 워크플로우 G (공문서 작성법 준수) ★
  └─ "HWPX 읽어줘" → 워크플로우 E (읽기/추출)
+```
+
+### ⚠️ 자동 판별 규칙 (사용자가 .hwp 파일을 제공한 경우)
+
+> **사용자가 `.hwp` 파일을 주면 먼저 워크플로우 H로 HWPX 변환 후 후속 워크플로우를 진행한다.**
+
+```
+입력 파일 확인
+ ├─ .hwp 파일 → 워크플로우 H로 HWPX 변환
+ │   ├─ "변환만 해줘" → 변환 후 종료
+ │   ├─ "내용 바꿔줘" → 변환 후 워크플로우 F
+ │   ├─ "읽어줘/텍스트 추출" → 변환 후 워크플로우 E
+ │   └─ "수정해줘" → 변환 후 워크플로우 C
+ └─ .hwpx 파일 → 기존 워크플로우 판별 (아래)
 ```
 
 ### ⚠️ 자동 판별 규칙 (사용자가 양식 파일을 제공한 경우)
@@ -521,6 +539,101 @@ body_lines = [
 
 ---
 
+## 워크플로우 H: HWP → HWPX 변환 ★★
+
+> **HWP(바이너리) 파일을 HWPX(개방형 XML)로 변환. 이미지·도형·표 포함 문서 지원.**
+>
+> 변환 후 다른 워크플로우(E/C/F)와 조합 가능.
+
+### 트리거 조건
+
+- 사용자가 `.hwp` 파일 경로를 제공
+- "HWP를 HWPX로 변환", "한글 파일 변환", "hwp 파일 열어줘" 등
+
+### 전체 흐름
+
+```
+[1] .hwp 파일 확인
+[2] convert_hwp.py로 변환 → .hwpx 생성
+[3] validate.py 검증
+[4] (선택) 후속 워크플로우 진행 (E/C/F)
+```
+
+### CLI 사용법
+
+```bash
+# 기본 변환 (같은 이름 .hwpx로 출력)
+python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp
+
+# 출력 경로 지정
+python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp -o output.hwpx
+
+# 문서 정보 확인 (변환 없이)
+python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --info
+
+# JSON 출력
+python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --info --json
+```
+
+### Python API
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path("${CLAUDE_SKILL_DIR}/scripts")))
+from convert_hwp import convert, info
+
+# 변환
+output_path = convert("input.hwp", "output.hwpx")
+
+# 정보 확인
+metadata = info("input.hwp")
+print(metadata["title"], metadata["section_count"])
+```
+
+### 변환 후 후속 작업 예시
+
+```bash
+# HWP → HWPX 변환
+python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" doc.hwp -o doc.hwpx
+
+# 검증
+python3 "${CLAUDE_SKILL_DIR}/scripts/validate.py" doc.hwpx
+
+# 텍스트 추출 (Workflow E)
+python3 "${CLAUDE_SKILL_DIR}/scripts/text_extract.py" doc.hwpx
+
+# 양식 복제 (Workflow F)
+python3 "${CLAUDE_SKILL_DIR}/scripts/clone_form.py" doc.hwpx output.hwpx --map map.json
+python3 "${CLAUDE_SKILL_DIR}/scripts/fix_namespaces.py" output.hwpx
+```
+
+### 의존성
+
+```bash
+pip install pyhwp5 olefile lxml --break-system-packages
+```
+
+> `convert_hwp.py`는 누락된 패키지를 자동으로 설치하며,
+> `hwp2hwpx-python-refactor` 레포가 없으면 자동으로 클론한다.
+
+### 지원 범위
+
+| 항목 | 지원 |
+|------|------|
+| 텍스트 | ✅ |
+| 표 | ✅ |
+| 이미지 (PNG/JPG/BMP/GIF) | ✅ |
+| 도형 (사각형/원/선) | ✅ |
+| 컨테이너 (그룹 도형) | ✅ |
+| 각주/미주 | ✅ |
+| 다단 | ✅ |
+| 머리말/꼬리말 | ✅ |
+| OLE 객체 | ⚠️ 부분 지원 |
+| 수식 | ❌ 미지원 |
+
+---
+
 ## 네임스페이스 후처리 (★ 필수)
 
 > **⚠️ 빠뜨리면 한글 Viewer에서 빈 페이지로 표시된다!**
@@ -554,7 +667,7 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 
 ## Critical Rules
 
-1. **HWPX만 지원**: `.hwp`(바이너리)는 미지원
+1. **HWP+HWPX 지원**: `.hwp`(바이너리)는 워크플로우 H로 HWPX 변환 후 처리
 2. **secPr 필수**: 첫 문단 첫 run에 secPr + colPr
 3. **mimetype**: 첫 ZIP 엔트리, ZIP_STORED
 4. **네임스페이스**: `hp:`, `hs:`, `hh:`, `hc:` 접두사 유지
