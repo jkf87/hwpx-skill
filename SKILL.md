@@ -46,6 +46,7 @@ ${CLAUDE_SKILL_DIR}/
     ├── report-style.md        # 보고서 양식 상세
     ├── official-doc-style.md  # 공문서 양식 상세
     ├── gonmunseo-2025-writing-rules.md  # ★ 2025 개정 공문서 작성법
+    ├── kordoc-integration.md  # kordoc 장점 채택/보류 기준
     └── xml-internals.md       # 저수준 XML 구조
 ```
 

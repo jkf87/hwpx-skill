@@ -21,6 +21,7 @@ HWP/HWPX 문서 생성, 변환, 읽기, 편집을 위한 Claude 스킬.
 | **G** | 2025 개정 공문서 작성법 준수 |
 | **H** | **HWP(바이너리) → HWPX 변환** |
 | **I** | 문제지 1장 + 답안지 1장 HWPX 생성 |
+| **J** | **서식 보존 양식 필드 채우기** |
 
 ## 설치
 
@@ -60,6 +61,27 @@ python3 scripts/clone_form.py --analyze sample.hwpx
 # 복제 + 텍스트 치환
 python3 scripts/clone_form.py sample.hwpx output.hwpx --map replacements.json
 python3 scripts/fix_namespaces.py output.hwpx
+```
+
+### 양식 필드 채우기
+
+`scripts/fill_hwpx.py`는 kordoc의 `fillHwpx` 설계에서 가져온 라벨 인식,
+self-closing 빈 run 처리, 수정 엔트리만 ZIP 패치하는 보존형 채우기 방식을
+Python으로 포팅한 도구다. 신청서·정산서·강사카드처럼 라벨-값 셀이나
+체크박스/괄호 빈칸이 있는 서식에 먼저 사용한다.
+
+```bash
+# 채울 수 있는 필드 분석
+python3 scripts/fill_hwpx.py analyze form.hwpx
+
+# values.json 예: {"성명": "홍길동", "연락처": "010-1234-5678"}
+python3 scripts/fill_hwpx.py fill form.hwpx output.hwpx --values values.json
+
+# 값 삽입과 비변경 엔트리 보존 검증
+python3 scripts/fill_hwpx.py verify output.hwpx --values values.json --original form.hwpx
+
+# 한컴 열림 위험 신호까지 엄격 점검
+python3 scripts/fill_hwpx.py check output.hwpx --strict
 ```
 
 ### Final validation and layout QA
@@ -112,6 +134,8 @@ hwpx-skill/
 │   ├── verify_hwpx.py          # 품질 검증
 │   ├── validate.py             # 구조 검증
 │   ├── finalize_hwpx.py        # line cache removal, layout QA, Hancom open test
+│   ├── fill_hwpx.py            # 보존형 양식 필드 채우기
+│   ├── hwpx_guard_hook.py      # 배포 전 HWPX strict gate 보조 훅
 │   ├── text_extract.py         # 텍스트 추출
 │   ├── create_document.py      # 문서 생성
 │   ├── build_problem_answer_sheet.py # 문제지+답안지 2쪽 생성
@@ -152,10 +176,12 @@ hwpx-skill/
 6. After XML text replacement, remove `hp:linesegarray` before delivery
 7. For strict templates, split long table-cell prose and increase row height
 8. Use `validate.py --hancom` on Windows when Hancom openability matters
+9. 신청서·서식의 빈 필드 채우기는 `fill_hwpx.py analyze → fill → verify → check --strict` 순서로 처리
 
 ## 관련 프로젝트
 
 - [hwp2hwpx-python-refactor](https://github.com/jkf87/hwp2hwpx-python-refactor) — HWP→HWPX 변환 엔진
+- [kordoc](https://github.com/chrisryugj/kordoc) — 보존형 HWPX 양식 채우기와 ZIP 패치 설계 참고
 
 ## 라이선스
 
