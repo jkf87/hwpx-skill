@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<hs:sec xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hp10="http://www.hancom.co.kr/hwpml/2016/paragraph" xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core" xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hhs="http://www.hancom.co.kr/hwpml/2011/history" xmlns:hm="http://www.hancom.co.kr/hwpml/2011/master-page" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf/" xmlns:ooxmlchart="http://www.hancom.co.kr/hwpml/2016/ooxmlchart" xmlns:hwpunitchar="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar" xmlns:epub="http://www.idpf.org/2007/ops" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0">
+<hp:p id="1000000001" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">
+        <hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>
+        <hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>
+        <hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>
+        <hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>
+        <hp:pagePr landscape="WIDELY" width="59528" height="84186" gutterType="LEFT_ONLY">
+          <hp:margin header="4252" footer="4252" gutter="0" left="5669" right="5669" top="5668" bottom="4252"/>
+        </hp:pagePr>
+        <hp:footNotePr>
+          <hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>
+          <hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/>
+          <hp:noteSpacing betweenNotes="283" belowLine="567" aboveLine="850"/>
+          <hp:numbering type="CONTINUOUS" newNum="1"/>
+          <hp:placement place="EACH_COLUMN" beneathText="0"/>
+        </hp:footNotePr>
+        <hp:endNotePr>
+          <hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>
+          <hp:noteLine length="14692344" type="SOLID" width="0.12 mm" color="#000000"/>
+          <hp:noteSpacing betweenNotes="0" belowLine="567" aboveLine="850"/>
+          <hp:numbering type="CONTINUOUS" newNum="1"/>
+          <hp:placement place="END_OF_DOCUMENT" beneathText="0"/>
+        </hp:endNotePr>
+        <hp:pageBorderFill type="BOTH" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">
+          <hp:offset left="1417" right="1417" top="1417" bottom="1417"/>
+        </hp:pageBorderFill>
+        <hp:pageBorderFill type="EVEN" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">
+          <hp:offset left="1417" right="1417" top="1417" bottom="1417"/>
+        </hp:pageBorderFill>
+        <hp:pageBorderFill type="ODD" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER">
+          <hp:offset left="1417" right="1417" top="1417" bottom="1417"/>
+        </hp:pageBorderFill>
+      </hp:secPr><hp:ctrl>
+        <hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>
+      </hp:ctrl></hp:run></hp:p>
+<hp:p id="1000000002" paraPrIDRef="24" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="12"><hp:t>{{기관명}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000003" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t/></hp:run></hp:p>
+<hp:p id="1000000004" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="14"><hp:t>수신  </hp:t></hp:run><hp:run charPrIDRef="11"><hp:t>{{수신}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000005" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t>(경유)  {{경유}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000006" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="14"><hp:t>제목  </hp:t></hp:run><hp:run charPrIDRef="11"><hp:t>{{제목}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000007" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t/></hp:run></hp:p>
+<hp:p id="1000000008" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t>1.  {{본문1}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000009" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t>  가.  {{본문2}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000010" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t>2.  {{본문3}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000011" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t/></hp:run></hp:p>
+<hp:p id="1000000012" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="14"><hp:t>붙임  </hp:t></hp:run><hp:run charPrIDRef="11"><hp:t>{{붙임}} 1부.  끝.</hp:t></hp:run></hp:p>
+<hp:p id="1000000013" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t/></hp:run></hp:p>
+<hp:p id="1000000014" paraPrIDRef="24" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="13"><hp:t>{{발신명의}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000015" paraPrIDRef="23" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="11"><hp:t/></hp:run></hp:p>
+<hp:p id="1000000016" paraPrIDRef="25" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="15"><hp:t>──────────────────────────────────────────────</hp:t></hp:run></hp:p>
+<hp:p id="1000000017" paraPrIDRef="25" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="15"><hp:t>기안자 {{기안자}}      검토자 {{검토자}}      결재권자 {{결재권자}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000018" paraPrIDRef="25" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="15"><hp:t>협조자 {{협조자}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000019" paraPrIDRef="25" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="15"><hp:t>시행  {{시행}}        접수  {{접수}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000020" paraPrIDRef="25" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="15"><hp:t>우 {{우편번호}}  {{주소}}      /  {{홈페이지}}</hp:t></hp:run></hp:p>
+<hp:p id="1000000021" paraPrIDRef="25" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="15"><hp:t>전화 {{전화}}      전송 {{전송}}      /  {{이메일}}      /  {{공개구분}}</hp:t></hp:run></hp:p>
+</hs:sec>

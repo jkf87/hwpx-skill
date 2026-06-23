@@ -45,6 +45,8 @@ Python 표준 라이브러리만으로 포팅한 것이다. 설계 원칙:
 종료 코드: 0=성공, 1=오류, 2=채워진 항목 없음/검증 실패
 """
 
+from __future__ import annotations  # Python 3.9 호환: str | None 등 어노테이션 지연 평가
+
 import argparse
 import io
 import json
