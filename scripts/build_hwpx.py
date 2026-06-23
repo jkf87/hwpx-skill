@@ -26,6 +26,8 @@ Usage:
     python build_hwpx.py --template gonmun --section my.xml --title "제목" --creator "작성자" --output result.hwpx
 """
 
+from __future__ import annotations  # Python 3.9 호환: str | None 등 어노테이션 지연 평가
+
 import argparse
 import shutil
 import sys
@@ -42,7 +44,12 @@ SKILL_DIR = SCRIPT_DIR.parent
 TEMPLATES_DIR = SKILL_DIR / "templates"
 BASE_DIR = TEMPLATES_DIR / "base"
 
-AVAILABLE_TEMPLATES = ["gonmun", "report", "minutes"]
+# templates/ 하위의 실제 디렉터리를 동적으로 인식(base 제외).
+# 하드코딩 목록은 government/proposal/gonmun2025 등 신규 템플릿을 누락시켰음.
+AVAILABLE_TEMPLATES = sorted(
+    p.name for p in TEMPLATES_DIR.iterdir()
+    if p.is_dir() and p.name != "base"
+) if TEMPLATES_DIR.is_dir() else ["gonmun", "report", "minutes"]
 
 
 def validate_xml(filepath: Path) -> None:
