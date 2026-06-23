@@ -27,17 +27,24 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── text_extract.py        # 텍스트 추출
 │   ├── build_problem_answer_sheet.py  # 문제지 1장 + 답안지 1장 생성
 │   ├── md2hwpx.py             # 마크다운→HWPX 자동 변환
+│   ├── gonmun.py              # ★ 행정안전부 표준 기안문(별지 제1호서식) 생성기 (Workflow G)
+│   ├── gonmun_lint.py         # ★ 공문서 작성법 자동 검수기 (2025 편람)
+│   ├── bodojaryo.py           # ★ 정부 표준 보도자료 생성기 (레퍼런스 복제 방식)
+│   ├── gyehoek.py             # ★ 공공기관 계획서 생성기 (행안부 업무계획 복제, 제목/목차 토글)
+│   ├── gyehoek_hook.py        # ★ PreToolUse 훅 — 계획서 생성 전 제목/목차 포함 여부 강제 질문
 │   └── office/{unpack,pack}.py
 ├── templates/
 │   ├── base/                  # 베이스 Skeleton
 │   ├── report/                # 보고서
-│   ├── gonmun/                # 공문
+│   ├── gonmun/                # 공문(간이형)
+│   ├── gonmun2025/            # ★ 행정안전부 표준 기안문 별지 제1호서식 (맑은 고딕 11.5pt)
 │   ├── minutes/               # 회의록
 │   ├── proposal/              # 제안서
 │   └── government/            # ★ 관공서 (컬러 섹션 바/표지 배너)
 ├── assets/
 │   ├── report-template.hwpx
-│   ├── government-reference.hwpx
+│   ├── gyehoek-reference.hwpx       # ★ 공공기관 계획서 기본양식(행안부 2025 업무계획) — gyehoek.py가 복제
+│   ├── bodojaryo-reference.hwpx     # ★ 정부 표준 보도자료 양식(고정) — bodojaryo.py가 복제
 │   └── problem-answer-reference.hwpx
 └── references/
     ├── xml-structure.md       # XML 구조, 이미지 삽입, 표지/섹션 바 패턴
@@ -257,7 +264,7 @@ sys.path.insert(0, str(Path("${CLAUDE_SKILL_DIR}/scripts")))
 from hwpx_helpers import *
 
 SKILL_DIR = Path("${CLAUDE_SKILL_DIR}")
-REF_HWPX = SKILL_DIR / "assets" / "government-reference.hwpx"
+REF_HWPX = SKILL_DIR / "assets" / "gyehoek-reference.hwpx"
 OUTPUT = Path("output.hwpx")
 
 # 0. government header 검증 (잘못된 header 사용 방지)
@@ -543,6 +550,39 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 > ⚠️ **테이블 5개 이상 또는 이미지 포함이면 반드시 워크플로우 F 사용.**
 > 워크플로우 D는 header만 재활용하고 section을 새로 만들기 때문에 구조의 97.5%를 잃는다.
 
+> ### ★ 정부 표준 보도자료 (고정 양식)
+>
+> 보도자료는 표 5개·로고 이미지 6개로 구성되어 **반드시 복제 방식**을 쓴다.
+> 실제 정부 보도자료를 `assets/bodojaryo-reference.hwpx`로 고정해 두었고,
+> `scripts/bodojaryo.py`가 이를 복제해 **표·로고·글꼴을 100% 보존**하면서 본문(□/ㅇ/*)과
+> 머리표(보도시점·제목·부제·담당자)만 교체한다.
+>
+> ```bash
+> python3 scripts/bodojaryo.py --sample --output 보도자료.hwpx        # 샘플
+> python3 scripts/bodojaryo.py --input bodo.json --output 보도자료.hwpx  # JSON 입력
+> python3 scripts/gonmun_lint.py --hwpx 보도자료.hwpx --format text       # 본문 작성법 검수
+> ```
+> 양식 구조·JSON 스키마는 `scripts/bodojaryo.py` 헤더 주석 참조. 본문 마커는 `□`(대) → `ㅇ`(하위,
+> ○ 아님) → `*`(각주). 로고는 레퍼런스 것이 들어가므로 본인 기관용은 한컴에서 이미지만 교체한다.
+
+> ### ★ 공공기관 계획서 (기본 양식 = 행안부 2025 업무계획)
+>
+> 계획서는 표 24개로 구성되어 **복제 방식**을 쓴다. 실제 행정안전부 「2025년 주요업무 추진계획」을
+> `assets/gyehoek-reference.hwpx`로 채택했고(기존 저품질 체육과 문서 교체), `scripts/gyehoek.py`가
+> 이를 복제해 표·글꼴을 보존하면서 **표지 제목·작성연월을 교체**하고 **표지/목차(순서)를 토글**한다.
+>
+> ⚠️ **계획서 생성 전에는 `gyehoek_hook.py`(PreToolUse 훅)가 제목·목차 포함 여부를 사용자에게
+> 먼저 묻도록 강제한다.** 즉 두 결정(아래 플래그)을 명시하지 않고 `gyehoek.py`를 실행하면 훅이
+> 차단하므로, **반드시 사용자에게 먼저 질문**한 뒤 결정값을 붙여 실행한다.
+>
+> ```bash
+> # 제목 넣음 + 목차 넣음
+> python3 scripts/gyehoek.py --title "2026년 ○○ 추진계획" --date "2026. 1." --toc --output 계획서.hwpx
+> # 제목 없음 + 목차 없음
+> python3 scripts/gyehoek.py --no-title --no-toc --output 계획서.hwpx
+> ```
+> 플래그: 제목 `--title "..."` / `--no-title`,  목차 `--toc` / `--no-toc`. (훅: settings.json PreToolUse 등록)
+
 ### 전체 흐름
 
 ```
@@ -680,12 +720,24 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/verify_hwpx.py" \
 
 ```
 [1] 사용자 요청 분석 (작성 vs 검수)
-[2] references/gonmunseo-2025-writing-rules.md 참조
-[3-A] 작성 모드: 공문서 작성법 규칙에 따라 본문 생성
-[3-B] 검수 모드: 기존 텍스트를 규칙 대비 검수 → 수정 제안
-[4] HWPX 생성 시 Workflow A 또는 gonmun 템플릿 사용
-[5] fix_namespaces.py + validate.py
+[2] references/gonmunseo-2025-writing-rules.md + official-doc-style.md 참조
+[3-A] 작성 모드: 공문서 작성법 규칙에 따라 본문(body) 생성
+[3-B] 검수 모드: scripts/gonmun_lint.py로 자동 검수 → 수정 제안
+[4] 표준 기안문 HWPX 생성 → scripts/gonmun.py (두문·본문·결문 자동, gonmun2025 템플릿)
+[5] 생성물 자동 검수: scripts/gonmun_lint.py --hwpx
 ```
+
+> ### ★ 표준 기안문 생성기 (행정안전부 별지 제1호서식)
+>
+> **두문(행정기관명·수신·경유·제목) + 본문 + 결문(발신명의·기안자/검토자/결재권자·협조자·시행/접수·우편번호/주소·전화/전송·이메일·공개구분)**
+> 전체를 한 번에 조립한다. 글꼴은 **맑은 고딕 11.5pt**(`templates/gonmun2025/`).
+>
+> ```bash
+> python3 scripts/gonmun.py --sample --output 기안문.hwpx        # 샘플
+> python3 scripts/gonmun.py --input gonmun.json --output out.hwpx  # JSON 입력
+> ```
+> JSON 스키마·결문 구성은 [references/official-doc-style.md](references/official-doc-style.md) §9 참조.
+> LLM은 본문(`body[]`)만 Workflow G 작성법으로 채우면 되고, 서식(두문·결문)은 생성기가 처리한다.
 
 ### 작성 모드: 공문서 본문 자동 생성
 
@@ -735,11 +787,18 @@ body_lines = [
 
 ### 검수 모드: 기존 공문서 텍스트 검수
 
+> **`scripts/gonmun_lint.py`로 자동 검수한다.** 날짜·시간·금액·붙임·물결표·외국어 병기·쌍점 등
+> 작성법 위반을 정규식으로 탐지하고 수정안을 제시한다(error는 종료코드 1).
+
+```bash
+python3 scripts/gonmun_lint.py --hwpx 문서.hwpx --format text   # .hwpx 검수
+python3 scripts/gonmun_lint.py --file 본문.txt                  # 텍스트 파일
+echo "2025.1.6 오후 3시 회의" | python3 scripts/gonmun_lint.py   # 표준입력(JSON 출력)
 ```
-[1] text_extract.py로 텍스트 추출
-[2] 아래 검수 항목별 위반 여부 확인
-[3] 위반 사항 목록 + 수정 제안 출력
-```
+
+탐지 규칙: `DATE_NO_SPACE`(2025.1.6), `DATE_ZERO_PAD`(2025. 01. 06.), `DATE_2DIGIT_YR`('24.),
+`TIME_AMPM`(오후 3시), `TIME_24H`(24시), `MONEY_CHEONWON`(345천원), `BUNIM_COLON`(붙임:),
+`KKAJI_DUP`(∼…까지), `FOREIGN_FIRST`(MOU(업무협약)), `COLON_SPACE` 등.
 
 #### 검수 항목
 

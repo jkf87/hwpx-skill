@@ -18,7 +18,7 @@ HWP/HWPX 문서 생성, 변환, 읽기, 편집을 위한 Claude 스킬.
 | **D** | 레퍼런스 HWPX 기반 새 문서 생성 |
 | **E** | HWPX 텍스트 읽기/추출 |
 | **F** | 양식 복제 (테이블/이미지/스타일 100% 보존) |
-| **G** | 2025 개정 공문서 작성법 준수 |
+| **G** | 행정안전부 표준 기안문(별지 제1호서식) 생성 + 작성법 자동 검수 (2025 행정업무운영 편람) |
 | **H** | **HWP(바이너리) → HWPX 변환** |
 | **I** | 문제지 1장 + 답안지 1장 HWPX 생성 |
 | **J** | **서식 보존 양식 필드 채우기** |
@@ -50,6 +50,36 @@ sys.path.insert(0, str(Path("scripts")))
 from hwpx_helpers import *
 
 # section0.xml 조립 → build_hwpx.py로 빌드 → fix_namespaces.py 후처리
+```
+
+### 행정안전부 표준 기안문(별지 제1호서식) 생성
+
+```bash
+# 샘플 기안문 생성 (두문·본문·결문 + 맑은 고딕 11.5pt)
+python3 scripts/gonmun.py --sample --output 기안문.hwpx
+
+# JSON 입력으로 생성
+python3 scripts/gonmun.py --input gonmun.json --output 기안문.hwpx
+
+# 작성법 자동 검수 (날짜·시간·금액·붙임·물결표·외국어 병기 등)
+python3 scripts/gonmun_lint.py --hwpx 기안문.hwpx --format text
+```
+
+### 정부 표준 보도자료 생성 (레퍼런스 복제, 양식 고정)
+
+```bash
+# 실제 정부 보도자료 양식(assets/bodojaryo-reference.hwpx)을 복제 — 표·로고·글꼴 100% 보존,
+# 본문(□/ㅇ/*)·머리표(보도시점·제목·부제·담당자)만 교체
+python3 scripts/bodojaryo.py --sample --output 보도자료.hwpx
+python3 scripts/bodojaryo.py --input bodo.json --output 보도자료.hwpx
+```
+
+### 공공기관 계획서 생성 (행안부 업무계획 양식, 제목/목차 토글)
+
+```bash
+# ⚠️ 계획서 생성 전 제목·목차 포함 여부를 사용자에게 먼저 질문 (PreToolUse 훅 gyehoek_hook.py가 강제)
+python3 scripts/gyehoek.py --title "2026년 ○○ 추진계획" --date "2026. 1." --toc  --output 계획서.hwpx
+python3 scripts/gyehoek.py --no-title --no-toc --output 계획서.hwpx
 ```
 
 ### 양식 복제
@@ -130,6 +160,11 @@ hwpx-skill/
 │   ├── fix_namespaces.py       # 네임스페이스 후처리 (필수)
 │   ├── clone_form.py           # 양식 복제
 │   ├── md2hwpx.py              # 마크다운→HWPX 변환
+│   ├── gonmun.py               # 행정안전부 표준 기안문 생성기
+│   ├── gonmun_lint.py          # 공문서 작성법 자동 검수기
+│   ├── bodojaryo.py            # 정부 표준 보도자료 생성기(레퍼런스 복제)
+│   ├── gyehoek.py             # 공공기관 계획서 생성기(행안부 업무계획 복제)
+│   ├── gyehoek_hook.py        # PreToolUse 훅 — 계획서 제목/목차 포함 여부 강제 질문
 │   ├── analyze_template.py     # HWPX 심층 분석
 │   ├── verify_hwpx.py          # 품질 검증
 │   ├── validate.py             # 구조 검증
