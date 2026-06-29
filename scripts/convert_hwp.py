@@ -100,13 +100,49 @@ def _fix_char_borders(hwpx_path):
         print(f"[convert_hwp] 글자 테두리 후처리 건너뜀: {e}", file=sys.stderr)
 
 
-def convert(input_path, output_path=None, fix_char_borders=True):
+def _fix_text_direction(hwpx_path):
+    """hwp2hwpx가 셀 textDirection을 무더기로 VERTICAL로 잘못 넣는 버그 보정.
+
+    가로 양식인데 변환기가 셀 대부분을 세로쓰기로 만들어 글자가 세로로 뒤집혀
+    보이는 사고가 있다(강사카드 사례). 한 섹션에서 VERTICAL이 HORIZONTAL보다
+    많으면(=오변환 신호) 전부 HORIZONTAL로 되돌린다. 세로가 소수면(의도적
+    세로 셀일 수 있어) 건드리지 않는다. fill_hwpx가 없거나 실패해도 변환은 성공.
+    """
+    try:
+        import io
+        import zipfile
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fill_hwpx import patch_zip_entries, section_names
+        with open(hwpx_path, "rb") as f:
+            buf = f.read()
+        repl, flipped = {}, 0
+        with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+            for n in section_names(zf):
+                x = zf.read(n).decode("utf-8")
+                v = x.count('textDirection="VERTICAL"')
+                h = x.count('textDirection="HORIZONTAL"')
+                if v > h and v >= 3:
+                    repl[n] = x.replace('textDirection="VERTICAL"',
+                                        'textDirection="HORIZONTAL"').encode("utf-8")
+                    flipped += v
+        if repl:
+            with open(hwpx_path, "wb") as f:
+                f.write(patch_zip_entries(buf, repl))
+            print(f"[convert_hwp] 세로쓰기 오변환 보정: {flipped}개 셀 "
+                  "VERTICAL→HORIZONTAL")
+    except Exception as e:  # noqa: BLE001
+        print(f"[convert_hwp] 세로쓰기 후처리 건너뜀: {e}", file=sys.stderr)
+
+
+def convert(input_path, output_path=None, fix_char_borders=True,
+            fix_text_direction=True):
     """HWP 파일을 HWPX로 변환.
 
     Args:
         input_path: 입력 .hwp 파일 경로
         output_path: 출력 .hwpx 파일 경로 (기본: 같은 이름 .hwpx)
         fix_char_borders: 변환 후 글자 테두리 버그 자동 보정 (기본 True)
+        fix_text_direction: 세로쓰기 오변환 자동 보정 (기본 True)
 
     Returns:
         출력 파일 경로
@@ -117,6 +153,8 @@ def convert(input_path, output_path=None, fix_char_borders=True):
     out = convert_file(input_path, output_path)
     if fix_char_borders:
         _fix_char_borders(out)
+    if fix_text_direction:
+        _fix_text_direction(out)
     return out
 
 

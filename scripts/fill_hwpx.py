@@ -1523,6 +1523,22 @@ def detect_raw_llm(path):
     }
 
 
+def detect_vertical_dominance(path):
+    """셀 textDirection이 대부분 VERTICAL이면 hwp2hwpx 세로쓰기 오변환 의심.
+
+    가로 양식이 변환기 버그로 세로로 뒤집혀 '글자가 세로로' 깨져 보이는 사고를
+    잡는다(강사카드 사례). raw 탐지·XML 유효성은 못 잡는 시각적 깨짐이다.
+    세로가 소수면 의도적 세로 셀일 수 있어 의심하지 않는다.
+    """
+    v = h = 0
+    with zipfile.ZipFile(path) as zf:
+        for n in section_names(zf):
+            x = zf.read(n).decode("utf-8", "replace")
+            v += x.count('textDirection="VERTICAL"')
+            h += x.count('textDirection="HORIZONTAL"')
+    return {"suspect": v >= 3 and v > h, "vertical": v, "horizontal": h}
+
+
 def check_openable(path, strict=False):
     """한컴이 문서를 정상으로 열 수 있는지 정적 점검 — XML 유효성 너머.
 
@@ -1585,11 +1601,21 @@ def check_openable(path, strict=False):
             "charPr이 테두리 borderFill 참조) — 모든 글자에 네모 테두리가 보임. "
             "`fill_hwpx.py fix-borders`로 제거하세요")
 
+    # 세로쓰기 오변환 탐지 — hwp2hwpx가 가로 양식을 세로로 만든 사고
+    vd = detect_vertical_dominance(path)
+    if vd["suspect"]:
+        warnings.append(
+            f"세로쓰기 오변환 의심 (셀 textDirection VERTICAL {vd['vertical']} > "
+            f"HORIZONTAL {vd['horizontal']}) — 글자가 세로로 뒤집혀 보일 수 있음. "
+            "convert_hwp.py로 재변환(자동 보정 포함)하거나 VERTICAL→HORIZONTAL 교정")
+
     ok = (not errors
-          and (not strict or (not raw["raw_suspect"] and not cb["bug"])))
+          and (not strict or (not raw["raw_suspect"] and not cb["bug"]
+                              and not vd["suspect"])))
     return {"ok": ok, "errors": errors, "warnings": warnings,
             "raw_llm_suspect": raw["raw_suspect"], "raw_signals": raw["signals"],
-            "char_border_bug": cb["bug"], "char_border_signals": cb}
+            "char_border_bug": cb["bug"], "char_border_signals": cb,
+            "vertical_misconvert": vd["suspect"], "vertical_signals": vd}
 
 
 # ─── verify ────────────────────────────────────────────────────────
@@ -2481,12 +2507,14 @@ def _register_manifest(buf, hpf_name, item_id, entry, ext):
 
 
 def place_seal_hwpx(src, dst, image, anchor, size_mm=SEAL_DEFAULT_MM,
-                    dx_mm=0.0, dy_mm=0.0, occurrence=0):
-    """기준 문구(anchor) 옆에 떠있는 직인/서명 그림을 삽입.
+                    dx_mm=0.0, dy_mm=0.0, occurrence=0, overlap=False):
+    """기준 문구(anchor) 옆/위에 떠있는 직인/서명 그림을 삽입.
 
     문구가 든 문단(본문·표 셀 무관)의 끝에 floating <hp:pic> run을 붙인다.
-    오프셋은 그 문단 기준(vertRelTo/horzRelTo="PARA") — 앵커 앞 텍스트 폭만큼
-    오른쪽으로 이동시켜 글자 위가 아닌 옆에 찍히게 한다(claw opPlaceSeal 'right').
+    오프셋은 그 문단 기준(vertRelTo/horzRelTo="PARA").
+    - 기본: 앵커 오른쪽 옆에 찍는다(글자와 안 겹침).
+    - overlap=True: 도장처럼 **앵커 글자 위에 겹쳐** 찍는다(앵커 중앙 정렬,
+      줄 높이에 세로 중앙). 실제 직인 날인 모양.
     dx_mm/dy_mm은 계산값에 더하는 미세조정.
     """
     if not anchor:
@@ -2530,8 +2558,15 @@ def place_seal_hwpx(src, dst, image, anchor, size_mm=SEAL_DEFAULT_MM,
     idx = full.index(anchor)
     start_x = _est_text_width_mm(full[:idx], pt)
     anchor_w = _est_text_width_mm(anchor, pt)
-    dx = start_x + anchor_w + 2.0 + dx_mm   # 앵커 오른쪽 + 2mm 여백
-    dy = dy_mm
+    if overlap:
+        # 앵커 글자 중앙에 직인 중앙을 맞춰 겹쳐 찍음(도장 날인)
+        seal_w_mm = size_mm * aspect
+        line_h_mm = pt * 0.3528                 # 글자 높이(≈pt→mm)
+        dx = start_x + anchor_w / 2.0 - seal_w_mm / 2.0 + dx_mm
+        dy = -(size_mm - line_h_mm) / 2.0 + dy_mm   # 줄에 세로 중앙
+    else:
+        dx = start_x + anchor_w + 2.0 + dx_mm   # 앵커 오른쪽 + 2mm 여백
+        dy = dy_mm
     dx_hwp = int(round(dx * HWPUNIT_PER_MM))
     dy_hwp = int(round(dy * HWPUNIT_PER_MM))
 
@@ -4318,6 +4353,8 @@ def main():
                         help="세로 미세조정 mm (아래+)")
     p_seal.add_argument("--occurrence", type=int, default=0,
                         help="같은 문구가 여러 곳이면 몇 번째(0-base)")
+    p_seal.add_argument("--overlap", action="store_true",
+                        help="도장처럼 앵커 글자 위에 겹쳐 찍기(기본은 옆)")
 
     p_img = sub.add_parser(
         "insert-image", help="일반 이미지 삽입 (블록 또는 --inline)")
@@ -4547,7 +4584,7 @@ def main():
             info = place_seal_hwpx(
                 args.input, args.output, image=args.image, anchor=args.anchor,
                 size_mm=args.size_mm, dx_mm=args.dx_mm, dy_mm=args.dy_mm,
-                occurrence=args.occurrence)
+                occurrence=args.occurrence, overlap=args.overlap)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
