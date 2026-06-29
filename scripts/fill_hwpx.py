@@ -2165,7 +2165,7 @@ _IMG_MIME = {
     "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
     "bmp": "image/bmp", "gif": "image/gif",
 }
-HWPUNIT_PER_MM = 283.46    # 1mm ≈ 283.46 HWPUNIT (claw H)
+HWPUNIT_PER_MM = 7200.0 / 25.4  # 1mm ≈ 283.46 HWPUNIT (1인치=7200, claw H)
 _PT2MM = 25.4 / 72.0
 _PX_TO_HWPUNIT = 75        # 96dpi 1px = 1/96in = 75 HWPUNIT(1/7200in)
 SEAL_DEFAULT_MM = 20.0     # 직인 기본 크기(세로 기준; 가로는 가로세로비 유지)
@@ -3441,8 +3441,6 @@ def add_bookmark_hwpx(src, dst, name, after=None, para=None, section_idx=0):
 # '한컴 손상 문서' 최대 민감부 → 기존 자식/속성을 보존하며 속성값만 정확히
 # 변경(구조·태그 추가/삭제 금지). check_openable이 secPr 완전성을 본다.
 
-MM_TO_HWPUNIT = 7200.0 / 25.4  # 1인치=7200 HWPUNIT → 1mm≈283.46 HWPUNIT
-
 # 편집 용지 프리셋 (mm) — 세로(portrait) 기준 (너비, 높이)
 _PAGE_SIZES_MM = {
     "a3": (297.0, 420.0), "a4": (210.0, 297.0), "a5": (148.0, 210.0),
@@ -3452,7 +3450,7 @@ _PAGE_SIZES_MM = {
 
 
 def _mm_to_hu(mm):
-    return int(round(float(mm) * MM_TO_HWPUNIT))
+    return int(round(float(mm) * HWPUNIT_PER_MM))
 
 
 def set_para_break_hwpx(src, dst, kind, after=None, para=None, on=True,
