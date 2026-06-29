@@ -1886,6 +1886,165 @@ def remove_header_footer_hwpx(src, dst, kind):
             "sections": list(changed)}
 
 
+# ─── 네이티브 수식 삽입 (claw-hwp hwpx-edit.js buildEquationXml 포팅) ──
+#
+# 수식은 자기완결 <hp:equation> 봉투다 — font 속성을 객체에 내장하므로
+# header.xml charPr/BinData/매니페스트 등록이 전혀 필요 없다(외부 의존 0).
+# <hp:script>의 수식 문자열은 한컴 수식 편집기 문법(references/equation-syntax.md)
+# 이며 escape_text로 이스케이프해 그대로 삽입한다. <hp:sz>는 한컴이 script로
+# 재계산하는 렌더 힌트. treatAsChar="1"로 인라인 배치(글자처럼 흐름).
+# claw가 한컴독스 라운드트립으로 검증한 봉투 구조/속성을 임의 변형 없이 따른다.
+
+EQUATION_DEFAULT_W = 9200   # <hp:sz> 폭 힌트 (한컴이 script로 재계산)
+EQUATION_DEFAULT_H = 2588   # <hp:sz> 높이 힌트
+EQUATION_DEFAULT_BASE_UNIT = 1000  # 폰트 크기 (1000 ≈ 10pt)
+
+
+def _fresh_ids(xml, count):
+    """섹션에서 아직 쓰이지 않은 최소 양의 정수 id를 count개 (오름차순).
+
+    실제 한컴 저장본 id는 거대 난수라 max+1은 32비트 오버플로 위험이 있다 —
+    미사용 최소값을 쓰면 항상 안전한 범위에 들고 문서 내 유일성도 보장된다.
+    """
+    used = set(re.findall(r'\bid="(\d+)"', xml))
+    ids, i = [], 1
+    while len(ids) < count:
+        if str(i) not in used:
+            ids.append(i)
+        i += 1
+    return ids
+
+
+def _equation_xml(script, eq_id, width=EQUATION_DEFAULT_W,
+                  height=EQUATION_DEFAULT_H,
+                  base_unit=EQUATION_DEFAULT_BASE_UNIT):
+    """인라인 <hp:equation> 봉투 (claw buildEquationXml 1:1 포팅).
+
+    eq_id는 문서 내 유일한 정수 id. script는 escape_text로 이스케이프된다.
+    """
+    return (
+        '<hp:equation id="%d" zOrder="0" numberingType="EQUATION" '
+        'textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" '
+        'dropcapstyle="None" version="Equation Version 60" baseLine="71" '
+        'textColor="#000000" baseUnit="%d" lineMode="CHAR" font="HancomEQN">'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" '
+        'heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" '
+        'allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" '
+        'vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+        '<hp:outMargin left="56" right="56" top="0" bottom="0"/>'
+        '<hp:script>%s</hp:script></hp:equation>'
+        % (eq_id, base_unit, width, height, escape_text(script))
+    )
+
+
+def _para_not_in_table(el):
+    p = el.parent
+    while p is not None:
+        if p.name == "tbl":
+            return False
+        p = p.parent
+    return True
+
+
+def add_equation_after(xml, after, script, width, height, base_unit):
+    """기준 문구가 든 본문 문단 뒤에 수식 전용 새 문단을 삽입.
+
+    수식은 자체 PLAIN 문단(paraPrIDRef="0")에 둔다 — 앵커 문단이 목록/번호
+    머리(▶, "3.")를 가져도 그것을 물려받지 않게(claw opInsertEquation과 동일).
+    charPrIDRef만 앵커에서 빌려 폰트 정합을 맞춘다.
+    """
+    root = scan_xml(xml)
+    reg = Registry(xml)
+    target = None
+    for p_el in descendants(root, "p"):
+        if not _para_not_in_table(p_el):
+            continue
+        full = "".join(tn.text for tn in own_tnodes(p_el, reg))
+        if after in full:
+            target = p_el
+            break
+    if target is None:
+        raise ValueError("기준 문구를 찾을 수 없음: %r" % after)
+    ids = _fresh_ids(xml, 2)
+    eq = _equation_xml(script, ids[1], width, height, base_unit)
+    m = re.search(r'charPrIDRef="(\d+)"', xml[target.start:target.end])
+    char_id = m.group(1) if m else "0"
+    new_para = (
+        '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0"><hp:run charPrIDRef="%s">%s</hp:run></hp:p>'
+        % (ids[0], char_id, eq))
+    return apply_splices(xml, [(target.end, target.end, new_para)])
+
+
+def add_equation_in_cell(xml, table, row, col, script, width, height,
+                         base_unit):
+    """표 셀(table/row/col)의 첫 문단 끝에 인라인 수식 run을 추가.
+
+    좌표 모델은 fill --cells와 동일: table은 문서순서(중첩표 포함), row/col은
+    cellAddr. 셀의 첫 문단 charPrIDRef를 빌려 새 <hp:run>으로 감싸 삽입한다
+    (claw placeObjectInCell과 동일 — 기존 문단/내용 보존).
+    """
+    root = scan_xml(xml)
+    tables = list(descendants(root, "tbl"))
+    if table >= len(tables):
+        raise ValueError("표 인덱스 초과: %d (표 %d개)" % (table, len(tables)))
+    rows = direct_children(tables[table], "tr")
+    if row >= len(rows):
+        raise ValueError("행 인덱스 초과: %d (행 %d개)" % (row, len(rows)))
+    cells = direct_children(rows[row], "tc")
+    if col >= len(cells):
+        raise ValueError("열 인덱스 초과: %d (셀 %d개)" % (col, len(cells)))
+    paras = cell_paragraphs(cells[col])
+    if not paras:
+        raise ValueError("셀에 문단(<hp:p>)이 없어 수식을 삽입할 위치가 없음")
+    first_p = paras[0]
+    eq = _equation_xml(script, _fresh_ids(xml, 1)[0], width, height, base_unit)
+    m = re.search(r'charPrIDRef="(\d+)"',
+                  xml[first_p.content_start:first_p.content_end])
+    char_id = m.group(1) if m else "0"
+    run = '<hp:run charPrIDRef="%s">%s</hp:run>' % (char_id, eq)
+    return apply_splices(xml, [(first_p.content_end, first_p.content_end, run)])
+
+
+def add_equation_hwpx(src, dst, script, after=None, table=None, row=None,
+                      col=None, width=EQUATION_DEFAULT_W,
+                      height=EQUATION_DEFAULT_H,
+                      base_unit=EQUATION_DEFAULT_BASE_UNIT, section_idx=0):
+    """본문(--after) 또는 셀(--table/--row/--col)에 네이티브 수식 삽입."""
+    if not script or not str(script).strip():
+        raise ValueError("--script(수식 문자열)가 필요합니다")
+    in_cell = table is not None or row is not None or col is not None
+    if after is None and not in_cell:
+        raise ValueError("--after 또는 --table/--row/--col 중 하나를 지정하세요")
+    if after is not None and in_cell:
+        raise ValueError("--after와 --table/--row/--col은 함께 쓸 수 없습니다")
+    if in_cell and (table is None or row is None or col is None):
+        raise ValueError("셀 지정에는 --table/--row/--col 모두 필요합니다")
+    with open(src, "rb") as f:
+        buf = f.read()
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        sections = section_names(zf)
+        if not sections:
+            raise ValueError("HWPX에서 섹션 파일을 찾을 수 없습니다")
+        if section_idx >= len(sections):
+            raise ValueError("섹션 인덱스 초과: %d" % section_idx)
+        name = sections[section_idx]
+        xml = zf.read(name).decode("utf-8")
+    if after is not None:
+        new_xml = add_equation_after(xml, after, str(script),
+                                     width, height, base_unit)
+        where = {"mode": "after", "after": after}
+    else:
+        new_xml = add_equation_in_cell(xml, table, row, col, str(script),
+                                       width, height, base_unit)
+        where = {"mode": "cell", "table": table, "row": row, "col": col}
+    out = patch_zip_entries(buf, {name: new_xml.encode("utf-8")})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return name, where
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -1965,6 +2124,22 @@ def main():
                              "(미지정 시 기존값 보존, 신규는 BOTH)")
         _p.add_argument("--align",
                         help="가로 정렬 LEFT/CENTER/RIGHT (best-effort)")
+
+    p_eq = sub.add_parser("add-equation",
+                          help="네이티브 수식 삽입 (본문 --after 또는 셀 좌표)")
+    p_eq.add_argument("input")
+    p_eq.add_argument("output")
+    p_eq.add_argument("--script", required=True,
+                      help="수식 문자열 (예: x^2+y^2=z^2). "
+                           "문법은 references/equation-syntax.md 참고")
+    p_eq.add_argument("--after",
+                      help="기준 문구 (이 문구가 있는 본문 문단 뒤에 새 문단으로)")
+    p_eq.add_argument("--table", type=int, help="표 인덱스 (셀에 삽입)")
+    p_eq.add_argument("--row", type=int, help="행 인덱스 (cellAddr rowAddr)")
+    p_eq.add_argument("--col", type=int, help="열 인덱스 (cellAddr colAddr)")
+    p_eq.add_argument("--size", type=int,
+                      help="폰트 크기 baseUnit (1000≈10pt, 기본 1000)")
+    p_eq.add_argument("--section", type=int, default=0)
 
     p_pn = sub.add_parser("set-pagenum", help="자동 쪽번호 삽입")
     p_pn.add_argument("input")
@@ -2092,6 +2267,18 @@ def main():
                                           args.text, args.apply, args.align)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
+            return 0
+
+        if args.command == "add-equation":
+            base_unit = (args.size if args.size is not None
+                         else EQUATION_DEFAULT_BASE_UNIT)
+            name, where = add_equation_hwpx(
+                args.input, args.output, args.script,
+                after=args.after, table=args.table, row=args.row,
+                col=args.col, base_unit=base_unit, section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    "script": args.script, **where,
+                    "modified_entries": [name], "ok": True})
             return 0
 
         if args.command == "set-pagenum":
