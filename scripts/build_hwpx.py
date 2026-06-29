@@ -161,6 +161,31 @@ def validate_hwpx(hwpx_path: Path) -> list[str]:
     return errors
 
 
+def _write_preview(work: Path) -> None:
+    """본문(section0.xml) 텍스트로 Preview/PrvText.txt를 생성한다.
+
+    한컴은 저장 시 본문을 반영한 미리보기(PrvText)를 만든다. 템플릿의 빈
+    placeholder를 그대로 두면 fill_hwpx의 raw 탐지(미리보기 미반영 + 줄배치
+    부재)에 걸려 check --strict가 '빈 페이지' 위험으로 차단한다. 그래서 조립
+    단계에서 실제 본문을 반영한 미리보기를 써 둔다(md2hwpx·gonmun 등 공통).
+    """
+    section = work / "Contents" / "section0.xml"
+    if not section.is_file():
+        return
+    try:
+        tree = etree.parse(str(section))
+    except Exception:  # noqa: BLE001
+        return
+    parts = [el.text for el in tree.iter()
+             if etree.QName(el).localname == "t" and el.text]
+    preview = "\n".join(parts).strip()
+    if not preview:
+        return
+    prev_dir = work / "Preview"
+    prev_dir.mkdir(parents=True, exist_ok=True)
+    (prev_dir / "PrvText.txt").write_text(preview, encoding="utf-8")
+
+
 def build(
     template: str | None,
     header_override: Path | None,
@@ -212,6 +237,9 @@ def build(
             validate_xml(xml_file)
         for hpf_file in work.rglob("*.hpf"):
             validate_xml(hpf_file)
+
+        # 5.5 본문 기반 미리보기 생성 (raw '빈 페이지' 게이트 통과)
+        _write_preview(work)
 
         # 6. Pack
         pack_hwpx(work, output)

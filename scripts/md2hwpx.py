@@ -23,6 +23,7 @@ Usage:
       - 하위목록 → charPrIDRef=0, paraPrIDRef=25 (깊은 들여쓰기)
     1. 번호목록  → charPrIDRef=0, paraPrIDRef=24
 """
+from __future__ import annotations  # Python 3.9 호환: list[...] | None 등 어노테이션 지연 평가
 
 import argparse
 import re
