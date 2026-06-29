@@ -571,6 +571,59 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-para-style doc.hwpx out.h
 - 글자모양은 대상 문단 첫 run의 charPr를 기준으로 복제하므로 글꼴/크기 계열이 유지된다(요청한 항목만 변경). 한 문단의 모든 run에 적용된다.
 - ⚠️ 문단모양은 복제·변형 방식이라 **한컴오피스 데스크톱에선 유지되지만 한컴독스(웹) 라운드트립 시 정렬이 초기화**될 수 있다(claw 동일 한계). 데스크톱 산출물엔 문제없다.
 
+### 직인/서명·이미지: `place-seal` / `insert-image`
+
+서명/직인 이미지를 문서에 넣는다(BinData 추가 + content.hpf 등록 + section 참조, 원본 보존).
+**직인 PNG는 사용자가 제공**한다(생성 기능은 Pillow 의존이라 미포함).
+
+```bash
+# 직인/서명: 기준 문구(발신명의 등) 위에 떠있는(floating) 그림으로
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" place-seal doc.hwpx out.hwpx --image seal.png --anchor "발신명의" --size-mm 20 --dx-mm 0 --dy-mm 0
+# 일반 이미지: 새 문단 블록(기본) 또는 --inline(글자처럼)
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-image doc.hwpx out.hwpx --image fig.png --after "그림 위치" --size-mm 60 40
+```
+
+### 각주·미주·하이퍼링크·책갈피: `add-footnote` / `add-endnote` / `add-hyperlink` / `add-bookmark`
+
+대상 문단(`--after "문구"` 또는 `--para N`)에 삽입.
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" add-footnote doc.hwpx out.hwpx --after "본문 문구" --text "각주 내용"
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" add-hyperlink doc.hwpx out.hwpx --para -1 --url "https://example.kr" --text "바로가기"
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" add-bookmark doc.hwpx out.hwpx --after "장 제목" --name "ch1"
+```
+
+### 페이지·다단·쪽/단 나누기: `set-page` / `set-columns` / `page-break` / `column-break`
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-page doc.hwpx out.hwpx --orientation landscape --margin-mm 15 --size a4
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-columns doc.hwpx out.hwpx --count 2 --gap-mm 8
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" page-break doc.hwpx out.hwpx --after "여기서 쪽 나눔"   # 해제: --off
+```
+
+- ⚠️ `set-page`/`set-columns`는 secPr(pagePr/margin/colPr)를 정확히 보존하며 속성만 바꾼다. 섹션이 여러 개면 모든 secPr가 동일 적용된다(다중 섹션 개별 설정 미지원).
+
+### 목록: `set-bullet-list` / `set-number-list` / `clear-list`
+
+본문 문단을 글머리표(•)·번호목록으로 전환/해제. 범위는 `--para N --to M`.
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-bullet-list doc.hwpx out.hwpx --para 3 --to 6 --char "▶"
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-number-list doc.hwpx out.hwpx --after "목록 시작"
+```
+
+- ⚠️ **데스크톱 한컴 기준**. 한컴독스(웹)는 네이티브와 fingerprint가 다른 목록을 silent-strip할 수 있다(claw 동일 한계). 데스크톱 산출물엔 문제없다.
+
+### 차트: `insert-chart`
+
+OOXML 차트를 삽입(col/bar/line/area/pie). 범주·계열은 JSON 파일.
+
+```bash
+echo '["1월","2월","3월"]' > cat.json
+echo '[{"name":"매출","values":[10,20,15]}]' > series.json
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-chart doc.hwpx out.hwpx --type col --cat cat.json --series series.json --after "차트 위치"
+```
+
 ### 좌표 지정 폴백: `fill --cells`
 
 라벨 휴리스틱이 안 통하는 복잡한 표는 `analyze`가 보고한 좌표로 직접 채운다.
@@ -632,6 +685,11 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | 표 셀 배경/테두리·열추가·행삭제·셀병합 | **J `set-cell`/`add-col`/`del-row`/`merge-cells`** |
 | 수식 삽입(본문/셀) | **J `add-equation`** (문법: references/equation-syntax.md) |
 | 본문 글자/문단 서식(굵게·색·크기·정렬·줄간격) | **J `set-text-style`/`set-para-style`** |
+| 직인/서명·이미지 삽입 | **J `place-seal`/`insert-image`** (이미지 사용자 제공) |
+| 각주·미주·하이퍼링크·책갈피 | **J `add-footnote`/`add-endnote`/`add-hyperlink`/`add-bookmark`** |
+| 페이지 설정·다단·쪽/단 나누기 | **J `set-page`/`set-columns`/`page-break`/`column-break`** |
+| 글머리표·번호목록 전환 | **J `set-bullet-list`/`set-number-list`/`clear-list`** (데스크톱 기준) |
+| 차트 삽입(막대/선/원 등) | **J `insert-chart`** |
 | 개인정보(주민번호·계좌) 양식 채우기 | **`secure_fill.py`** (PII 비경유) |
 | 라벨 매칭 실패한 복잡한 표 | **J `fill --cells`** (좌표 지정) |
 | XML 전역 일괄 치환 (메타데이터 포함) | F (clone_form.py) |

@@ -127,6 +127,15 @@ python3 scripts/fill_hwpx.py add-equation doc.hwpx out.hwpx --after "기준 문�
 python3 scripts/fill_hwpx.py set-text-style doc.hwpx out.hwpx --after "제목 문구" --bold --color C00000 --size 16
 python3 scripts/fill_hwpx.py set-para-style doc.hwpx out.hwpx --after "제목 문구" --align center --line-spacing 180
 
+# 직인/서명 이미지(사용자 제공 PNG)를 기준 문구 위에 떠있게
+python3 scripts/fill_hwpx.py place-seal doc.hwpx out.hwpx --image seal.png --anchor "발신명의" --size-mm 20
+# 각주·하이퍼링크·책갈피 / 페이지·다단·쪽나누기 / 목록 / 차트
+python3 scripts/fill_hwpx.py add-footnote doc.hwpx out.hwpx --after "본문" --text "각주"
+python3 scripts/fill_hwpx.py set-page doc.hwpx out.hwpx --orientation landscape --margin-mm 15 --size a4
+python3 scripts/fill_hwpx.py set-columns doc.hwpx out.hwpx --count 2 --gap-mm 8
+python3 scripts/fill_hwpx.py set-bullet-list doc.hwpx out.hwpx --para 3 --to 6
+python3 scripts/fill_hwpx.py insert-chart doc.hwpx out.hwpx --type col --cat cat.json --series series.json
+
 # 개인정보(PII) 비경유 양식 채우기 — 값이 stdout/로그/모델 컨텍스트를 안 거침
 python3 scripts/secure_fill.py fill form.hwpx out.hwpx --profile profile.json --shred-profile
 
