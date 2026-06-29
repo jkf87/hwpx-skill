@@ -2047,6 +2047,510 @@ def add_equation_hwpx(src, dst, script, after=None, table=None, row=None,
     return name, where
 
 
+# ─── 직인/서명·이미지 삽입 (claw-hwp place_seal/opInsertImage 포팅) ──────
+#
+# 사용자 제공 PNG/JPG를 BinData/에 추가하고 content.hpf 매니페스트에 등록한 뒤,
+# section XML에 <hp:pic> 봉투를 삽입한다. 두 가지 배치:
+#   place-seal  — 기준 문구(발신명의·"서명 또는 인") 옆에 **떠있는(floating)** 그림.
+#                 treatAsChar="0" flowWithText="0"라 셀/표/페이지를 키우지 않고
+#                 글자 위에 겹쳐 찍힌다(claw opPlaceSeal의 핵심 속성).
+#   insert-image — 일반 이미지. 기본은 새 문단(블록, 가운데)으로, --inline이면
+#                  기준 문단 끝에 글자처럼(treatAsChar="1") 흐르게 삽입.
+# 원본보존: 변경한 section XML + content.hpf만 다시 쓰고 BinData 이미지는 새
+#   엔트리로 STORED 추가(실제 한컴 저장본도 BinData를 STORED로 보관). 나머지 보존.
+# binaryItemIDRef = content.hpf <opf:item> id(예: image1) — 실제 한컴 저장본과
+#   동일하게 header.xml binDataList 없이 매니페스트 id로 직접 참조한다.
+
+_IMG_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "bmp": "image/bmp", "gif": "image/gif",
+}
+HWPUNIT_PER_MM = 283.46    # 1mm ≈ 283.46 HWPUNIT (claw H)
+_PT2MM = 25.4 / 72.0
+_PX_TO_HWPUNIT = 75        # 96dpi 1px = 1/96in = 75 HWPUNIT(1/7200in)
+SEAL_DEFAULT_MM = 20.0     # 직인 기본 크기(세로 기준; 가로는 가로세로비 유지)
+
+
+def _find_hpf_name(buf):
+    """content.hpf(또는 .hpf) 매니페스트 엔트리 이름."""
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        for n in zf.namelist():
+            if n.endswith("content.hpf"):
+                return n
+        for n in zf.namelist():
+            if n.endswith(".hpf"):
+                return n
+    return None
+
+
+def _next_bindata_name(buf, ext):
+    """기존 BinData 파일명/매니페스트 id와 충돌하지 않는 (item_id, entry)."""
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        names = zf.namelist()
+        bins = set(n for n in names if n.startswith("BinData/"))
+        used_ids = set()
+        hpf = next((n for n in names if n.endswith(".hpf")), None)
+        if hpf:
+            h = zf.read(hpf).decode("utf-8")
+            used_ids = set(re.findall(r'<opf:item [^>]*\bid="([^"]+)"', h))
+    n = 1
+    while ("BinData/image%d.%s" % (n, ext) in bins
+           or "BinData/img%d.%s" % (n, ext) in bins
+           or ("image%d" % n) in used_ids):
+        n += 1
+    return "image%d" % n, "BinData/image%d.%s" % (n, ext)
+
+
+def add_and_patch_zip(original, replacements=None, additions=None):
+    """기존 엔트리(replacements)는 patch_zip_entries처럼 제자리 교체하고,
+    새 엔트리(additions, STORED)는 CD 앞에 추가한다. 나머지는 바이트 보존.
+
+    replacements/additions: {name: bytes}. additions의 이름은 기존에 없어야 한다.
+    엔트리 순서/압축 방식/mimetype 첫 엔트리 규약이 그대로 유지된다.
+    """
+    replacements = dict(replacements or {})
+    additions = dict(additions or {})
+    entries, cd_offset, eocd_offset = parse_central_directory(original)
+    names = {e["name"] for e in entries}
+    for name in replacements:
+        if name not in names:
+            raise ValueError("ZIP에 없는 엔트리: %s" % name)
+    for name in additions:
+        if name in names:
+            raise ValueError("이미 존재하는 엔트리(추가 불가): %s" % name)
+
+    by_local = sorted(entries, key=lambda e: e["local_offset"])
+    segments = []
+    new_local_offset = {}
+    new_meta = {}
+    offset = 0
+
+    for i, e in enumerate(by_local):
+        seg_end = (by_local[i + 1]["local_offset"]
+                   if i + 1 < len(by_local) else cd_offset)
+        new_local_offset[e["name"]] = offset
+        new_data = replacements.get(e["name"])
+        if new_data is None:
+            seg = original[e["local_offset"]:seg_end]
+            segments.append(seg)
+            offset += len(seg)
+            continue
+        lo = e["local_offset"]
+        if original[lo:lo + 4] != LOCAL_SIG:
+            raise ValueError("ZIP 로컬 헤더 시그니처 불일치")
+        name_len = struct.unpack_from("<H", original, lo + 26)[0]
+        extra_len = struct.unpack_from("<H", original, lo + 28)[0]
+        header = bytearray(original[lo:lo + 30 + name_len + extra_len])
+        if e["method"] == 0:
+            comp_data = new_data
+        else:
+            c = zlib.compressobj(9, zlib.DEFLATED, -15)
+            comp_data = c.compress(new_data) + c.flush()
+        crc = zlib.crc32(new_data) & 0xFFFFFFFF
+        flags = e["flags"] & ~0x0008
+        struct.pack_into("<H", header, 6, flags)
+        struct.pack_into("<I", header, 14, crc)
+        struct.pack_into("<I", header, 18, len(comp_data))
+        struct.pack_into("<I", header, 22, len(new_data))
+        segments.append(bytes(header))
+        segments.append(comp_data)
+        offset += len(header) + len(comp_data)
+        new_meta[e["name"]] = (flags, crc, len(comp_data), len(new_data))
+
+    # 새 엔트리(STORED) — 로컬 헤더 + 이름 + 데이터
+    added = []  # (name_bytes, local_offset, crc, size)
+    dos_time, dos_date = 0, 0x21  # 1980-01-01 00:00 (유효 최소값)
+    for name, data in additions.items():
+        name_b = name.encode("utf-8")
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        local_off = offset
+        hdr = bytearray(30)
+        hdr[0:4] = LOCAL_SIG
+        struct.pack_into("<H", hdr, 4, 20)             # version needed
+        struct.pack_into("<H", hdr, 6, 0)              # flags
+        struct.pack_into("<H", hdr, 8, 0)              # method STORED
+        struct.pack_into("<H", hdr, 10, dos_time)
+        struct.pack_into("<H", hdr, 12, dos_date)
+        struct.pack_into("<I", hdr, 14, crc)
+        struct.pack_into("<I", hdr, 18, len(data))     # comp size
+        struct.pack_into("<I", hdr, 22, len(data))     # uncomp size
+        struct.pack_into("<H", hdr, 26, len(name_b))
+        struct.pack_into("<H", hdr, 28, 0)             # extra len
+        segments.append(bytes(hdr))
+        segments.append(name_b)
+        segments.append(data)
+        offset += 30 + len(name_b) + len(data)
+        added.append((name_b, local_off, crc, len(data)))
+
+    # Central Directory — 기존 순서 유지(오프셋/메타 패치) + 새 엔트리 추가
+    new_cd_offset = offset
+    for e in entries:
+        cd = bytearray(original[e["cd_start"]:e["cd_end"]])
+        struct.pack_into("<I", cd, 42, new_local_offset[e["name"]])
+        meta = new_meta.get(e["name"])
+        if meta:
+            flags, crc, comp_size, uncomp_size = meta
+            struct.pack_into("<H", cd, 8, flags)
+            struct.pack_into("<I", cd, 16, crc)
+            struct.pack_into("<I", cd, 20, comp_size)
+            struct.pack_into("<I", cd, 24, uncomp_size)
+        segments.append(bytes(cd))
+        offset += len(cd)
+    for name_b, local_off, crc, size in added:
+        cd = bytearray(46)
+        cd[0:4] = CD_SIG
+        struct.pack_into("<H", cd, 4, 20)              # version made by
+        struct.pack_into("<H", cd, 6, 20)              # version needed
+        struct.pack_into("<H", cd, 8, 0)              # flags
+        struct.pack_into("<H", cd, 10, 0)             # method STORED
+        struct.pack_into("<H", cd, 12, dos_time)
+        struct.pack_into("<H", cd, 14, dos_date)
+        struct.pack_into("<I", cd, 16, crc)
+        struct.pack_into("<I", cd, 20, size)
+        struct.pack_into("<I", cd, 24, size)
+        struct.pack_into("<H", cd, 28, len(name_b))   # name len
+        struct.pack_into("<I", cd, 42, local_off)
+        segments.append(bytes(cd) + name_b)
+        offset += 46 + len(name_b)
+
+    new_cd_size = offset - new_cd_offset
+    total = len(entries) + len(added)
+    eocd = bytearray(original[eocd_offset:])
+    struct.pack_into("<H", eocd, 8, total)             # entries this disk
+    struct.pack_into("<H", eocd, 10, total)            # total entries
+    struct.pack_into("<I", eocd, 12, new_cd_size)
+    struct.pack_into("<I", eocd, 16, new_cd_offset)
+    segments.append(bytes(eocd))
+    return b"".join(segments)
+
+
+# ─── 이미지 픽셀 크기/가로세로비 (stdlib 헤더 파싱; claw imageAspectWH 포팅) ─
+
+def _png_size(data):
+    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n" \
+            and data[12:16] == b"IHDR":
+        w = struct.unpack_from(">I", data, 16)[0]
+        h = struct.unpack_from(">I", data, 20)[0]
+        return (w, h) if w and h else None
+    return None
+
+
+def _jpeg_size(data):
+    if len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:
+        return None
+    i, n = 2, len(data)
+    while i + 9 < n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            h = struct.unpack_from(">H", data, i + 5)[0]
+            w = struct.unpack_from(">H", data, i + 7)[0]
+            return (w, h) if w and h else None
+        if i + 4 > n:
+            break
+        i += 2 + struct.unpack_from(">H", data, i + 2)[0]
+    return None
+
+
+def _bmp_size(data):
+    if len(data) >= 26 and data[:2] == b"BM":
+        w = abs(struct.unpack_from("<i", data, 18)[0])
+        h = abs(struct.unpack_from("<i", data, 22)[0])
+        return (w, h) if w and h else None
+    return None
+
+
+def _gif_size(data):
+    if len(data) >= 10 and data[:6] in (b"GIF87a", b"GIF89a"):
+        w = struct.unpack_from("<H", data, 6)[0]
+        h = struct.unpack_from("<H", data, 8)[0]
+        return (w, h) if w and h else None
+    return None
+
+
+def _image_pixel_size(data):
+    for fn in (_png_size, _jpeg_size, _bmp_size, _gif_size):
+        r = fn(data)
+        if r:
+            return r
+    return None
+
+
+def _image_aspect(data, fallback=1.0):
+    sz = _image_pixel_size(data)
+    if sz and sz[1]:
+        return sz[0] / sz[1]
+    return fallback
+
+
+# ─── 폰트 메트릭(앵커 오프셋 계산; claw estTextWidthMm/charPrFontPt 포팅) ──
+
+def _est_text_width_mm(s, pt):
+    """대략적 텍스트 폭(mm). 한글/CJK는 전각(em), ASCII는 반각(em/2)."""
+    em = pt * _PT2MM
+    w = 0.0
+    for ch in s:
+        c = ord(ch)
+        wide = (0x1100 <= c <= 0x11FF or 0x3000 <= c <= 0x303F
+                or 0x3130 <= c <= 0x318F or 0x4E00 <= c <= 0x9FFF
+                or 0xAC00 <= c <= 0xD7A3 or 0xFF00 <= c <= 0xFFEF)
+        w += em if wide else em * 0.5
+    return w
+
+
+def _charpr_font_pt(header_xml, char_id):
+    """charPr id의 글자 크기(pt). height(1/100pt) → pt. 기본 10pt."""
+    if not header_xml or char_id is None:
+        return 10.0
+    cid = re.escape(str(char_id))
+    m = re.search(r'<hh:charPr\b[^>]*\bid="%s"[^>]*?\bheight="(\d+)"' % cid,
+                  header_xml)
+    if not m:
+        m = re.search(r'<hh:charPr\b[^>]*\bheight="(\d+)"[^>]*?\bid="%s"' % cid,
+                      header_xml)
+    if m:
+        return max(6.0, int(m.group(1)) / 100.0)
+    return 10.0
+
+
+# ─── <hp:pic> 봉투 (hwpx_helpers.make_image_para / claw buildPic와 동형) ──
+
+def _pic_element(xml, item_id, width, height, floating=False,
+                 dx_hwp=0, dy_hwp=0, rel="PARA", nat_w=None, nat_h=None):
+    """단일 <hp:pic> 요소 문자열. floating이면 떠있는 직인(겹침) 배치.
+
+    width/height: 표시 크기(HWPUNIT). nat_w/nat_h: 원본(orgSz/imgClip)용 자연 크기
+    (없으면 표시 크기 사용). id/instid는 섹션 내 미사용 최소 정수로 충돌 회피.
+    """
+    pic_id, inst_id = _fresh_ids(xml, 2)
+    nw = nat_w if nat_w else width
+    nh = nat_h if nat_h else height
+    cx, cy = width // 2, height // 2
+    if floating:
+        wrap = "IN_FRONT_OF_TEXT"
+        pos = (
+            'treatAsChar="0" affectLSpacing="0" flowWithText="0" '
+            'allowOverlap="1" holdAnchorAndSO="0" vertRelTo="%s" horzRelTo="%s" '
+            'vertAlign="TOP" horzAlign="LEFT" vertOffset="%d" horzOffset="%d"'
+            % (rel, rel, dy_hwp, dx_hwp))
+    else:
+        wrap = "TOP_AND_BOTTOM"
+        pos = (
+            'treatAsChar="1" affectLSpacing="0" flowWithText="1" '
+            'allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" '
+            'horzRelTo="COLUMN" vertAlign="TOP" horzAlign="CENTER" '
+            'vertOffset="0" horzOffset="0"')
+    return (
+        '<hp:pic id="%d" zOrder="0" numberingType="PICTURE" '
+        'textWrap="%s" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" '
+        'href="" groupLevel="0" instid="%d" reverse="0">'
+        '<hp:offset x="0" y="0"/>'
+        '<hp:orgSz width="%d" height="%d"/>'
+        '<hp:curSz width="%d" height="%d"/>'
+        '<hp:flip horizontal="0" vertical="0"/>'
+        '<hp:rotationInfo angle="0" centerX="%d" centerY="%d" rotateimage="0"/>'
+        '<hp:renderingInfo>'
+        '<hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '<hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '<hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '</hp:renderingInfo>'
+        '<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="%d" y="0"/>'
+        '<hc:pt2 x="%d" y="%d"/><hc:pt3 x="0" y="%d"/></hp:imgRect>'
+        '<hp:imgClip left="0" right="%d" top="0" bottom="%d"/>'
+        '<hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:imgDim dimwidth="%d" dimheight="%d"/>'
+        '<hc:img binaryItemIDRef="%s" bright="0" contrast="0" '
+        'effect="REAL_PIC" alpha="0"/><hp:effects/>'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" '
+        'heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos %s/>'
+        '<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:shapeComment>inserted image</hp:shapeComment>'
+        '</hp:pic>'
+        % (pic_id, wrap, inst_id, nw, nh, width, height, cx, cy,
+           width, width, height, height, nw, nh, nw, nh, item_id,
+           width, height, pos))
+
+
+def _embed_image(buf, image_path):
+    """이미지 바이트를 읽고 (item_id, entry, ext, data, aspect, nat_w, nat_h)."""
+    ext = image_path.rsplit(".", 1)[-1].lower() if "." in image_path else ""
+    if ext not in _IMG_MIME:
+        raise ValueError(
+            "지원하지 않는 이미지 형식: .%s (png/jpg/jpeg/bmp/gif)" % ext)
+    with open(image_path, "rb") as f:
+        data = f.read()
+    if not data:
+        raise ValueError("이미지 파일이 비어 있습니다: %s" % image_path)
+    item_id, entry = _next_bindata_name(buf, ext)
+    aspect = _image_aspect(data)
+    px = _image_pixel_size(data)
+    nat_w = px[0] * _PX_TO_HWPUNIT if px else None
+    nat_h = px[1] * _PX_TO_HWPUNIT if px else None
+    return item_id, entry, ext, data, aspect, nat_w, nat_h
+
+
+def _register_manifest(buf, hpf_name, item_id, entry, ext):
+    """content.hpf에 <opf:item> 추가한 새 XML(bytes). 이미 있으면 그대로."""
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        hpf_xml = zf.read(hpf_name).decode("utf-8")
+    if ('href="%s"' % entry) in hpf_xml:
+        return hpf_xml.encode("utf-8")
+    item = ('<opf:item id="%s" href="%s" media-type="%s" isEmbeded="1"/>'
+            % (item_id, entry, _IMG_MIME[ext]))
+    if "</opf:manifest>" not in hpf_xml:
+        raise ValueError("content.hpf에 <opf:manifest>가 없습니다")
+    hpf_xml = hpf_xml.replace("</opf:manifest>", item + "</opf:manifest>", 1)
+    return hpf_xml.encode("utf-8")
+
+
+def place_seal_hwpx(src, dst, image, anchor, size_mm=SEAL_DEFAULT_MM,
+                    dx_mm=0.0, dy_mm=0.0, occurrence=0):
+    """기준 문구(anchor) 옆에 떠있는 직인/서명 그림을 삽입.
+
+    문구가 든 문단(본문·표 셀 무관)의 끝에 floating <hp:pic> run을 붙인다.
+    오프셋은 그 문단 기준(vertRelTo/horzRelTo="PARA") — 앵커 앞 텍스트 폭만큼
+    오른쪽으로 이동시켜 글자 위가 아닌 옆에 찍히게 한다(claw opPlaceSeal 'right').
+    dx_mm/dy_mm은 계산값에 더하는 미세조정.
+    """
+    if not anchor:
+        raise ValueError("--anchor(기준 문구)가 필요합니다")
+    if size_mm <= 0:
+        raise ValueError("--size-mm은 양수여야 합니다")
+    buf, names, xmls, header_xml = _load_doc(src)
+    hpf_name = _find_hpf_name(buf)
+    if not hpf_name:
+        raise ValueError("content.hpf를 찾을 수 없습니다")
+    item_id, entry, ext, data, aspect, nat_w, nat_h = _embed_image(buf, image)
+
+    # 문구가 든 문단을 문서 순서로 수집(본문/셀 모두)
+    target_section = None
+    cands = []
+    for n in names:
+        xml = xmls[n]
+        root = scan_xml(xml)
+        reg = Registry(xml)
+        for p_el in descendants(root, "p"):
+            full = "".join(tn.text for tn in own_tnodes(p_el, reg))
+            if anchor in full:
+                cands.append((n, p_el, full))
+        if cands:
+            target_section = n
+            break
+    if not cands:
+        raise ValueError("기준 문구를 찾을 수 없음: %r" % anchor)
+    if occurrence < 0 or occurrence >= len(cands):
+        raise ValueError(
+            "occurrence %d 없음 (이 섹션에서 %d개 발견 — 0..%d)"
+            % (occurrence, len(cands), len(cands) - 1))
+    name, p_el, full = cands[occurrence]
+    xml = xmls[name]
+
+    h_hwp = max(1, int(round(size_mm * HWPUNIT_PER_MM)))
+    w_hwp = max(1, int(round(size_mm * aspect * HWPUNIT_PER_MM)))
+    m = re.search(r'charPrIDRef="(\d+)"', xml[p_el.start:p_el.end])
+    char_id = m.group(1) if m else "0"
+    pt = _charpr_font_pt(header_xml, char_id)
+    idx = full.index(anchor)
+    start_x = _est_text_width_mm(full[:idx], pt)
+    anchor_w = _est_text_width_mm(anchor, pt)
+    dx = start_x + anchor_w + 2.0 + dx_mm   # 앵커 오른쪽 + 2mm 여백
+    dy = dy_mm
+    dx_hwp = int(round(dx * HWPUNIT_PER_MM))
+    dy_hwp = int(round(dy * HWPUNIT_PER_MM))
+
+    pic = _pic_element(xml, item_id, w_hwp, h_hwp, floating=True,
+                       dx_hwp=dx_hwp, dy_hwp=dy_hwp, rel="PARA",
+                       nat_w=nat_w, nat_h=nat_h)
+    run = '<hp:run charPrIDRef="0">%s</hp:run>' % pic
+    splices = [(p_el.content_end, p_el.content_end, run)]
+    _strip_para_linesegs(xml, p_el, splices)
+    new_xml = apply_splices(xml, splices)
+
+    replacements = {name: new_xml.encode("utf-8"),
+                    hpf_name: _register_manifest(buf, hpf_name, item_id,
+                                                 entry, ext)}
+    out = add_and_patch_zip(buf, replacements, {entry: data})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return {"section": name, "anchor": anchor, "occurrence": occurrence,
+            "item_id": item_id, "entry": entry, "size_mm": size_mm,
+            "dx_mm": round(dx, 2), "dy_mm": round(dy, 2),
+            "modified_entries": sorted(replacements),
+            "added_entries": [entry]}
+
+
+def insert_image_hwpx(src, dst, image, after=None, para=None, inline=False,
+                      width_mm=None, height_mm=None, section_idx=0):
+    """일반 이미지 삽입. 기본은 기준 문단 뒤 새 문단(블록, 가운데),
+    --inline이면 기준 문단 끝에 글자처럼(treatAsChar="1") 흐르게 삽입."""
+    buf, names, xmls, header_xml = _load_doc(src)
+    hpf_name = _find_hpf_name(buf)
+    if not hpf_name:
+        raise ValueError("content.hpf를 찾을 수 없습니다")
+    item_id, entry, ext, data, aspect, nat_w, nat_h = _embed_image(buf, image)
+
+    name, xml, p_el = _resolve_target_para(names, xmls, after, para,
+                                           section_idx)
+
+    # 표시 크기 결정 (HWPUNIT)
+    if width_mm and height_mm:
+        w_hwp = int(round(width_mm * HWPUNIT_PER_MM))
+        h_hwp = int(round(height_mm * HWPUNIT_PER_MM))
+    elif width_mm:
+        w_hwp = int(round(width_mm * HWPUNIT_PER_MM))
+        h_hwp = max(1, int(round(w_hwp / aspect)))
+    elif height_mm:
+        h_hwp = int(round(height_mm * HWPUNIT_PER_MM))
+        w_hwp = max(1, int(round(h_hwp * aspect)))
+    elif nat_w and nat_h:
+        w_hwp, h_hwp = int(nat_w), int(nat_h)   # 원본 픽셀(96dpi) 크기
+    else:
+        w_hwp = int(round(40.0 * HWPUNIT_PER_MM))   # 폭 40mm 기본
+        h_hwp = max(1, int(round(w_hwp / aspect)))
+    if w_hwp <= 0 or h_hwp <= 0:
+        raise ValueError("이미지 크기는 양수여야 합니다")
+
+    if inline:
+        pic = _pic_element(xml, item_id, w_hwp, h_hwp, floating=False,
+                           nat_w=nat_w, nat_h=nat_h)
+        m = re.search(r'charPrIDRef="(\d+)"', xml[p_el.start:p_el.end])
+        char_id = m.group(1) if m else "0"
+        run = '<hp:run charPrIDRef="%s">%s</hp:run>' % (char_id, pic)
+        splices = [(p_el.content_end, p_el.content_end, run)]
+        _strip_para_linesegs(xml, p_el, splices)
+        new_xml = apply_splices(xml, splices)
+        where = "inline"
+    else:
+        pic = _pic_element(xml, item_id, w_hwp, h_hwp, floating=False,
+                           nat_w=nat_w, nat_h=nat_h)
+        # _pic_element는 _fresh_ids(xml,2)로 pic/inst id를 쓰므로, 새 문단 id는
+        # 세 번째 미사용 정수를 쓴다(같은 xml이라 충돌 없음).
+        pid = _fresh_ids(xml, 3)[2]
+        m = re.search(r'charPrIDRef="(\d+)"', xml[p_el.start:p_el.end])
+        char_id = m.group(1) if m else "0"
+        new_para = (
+            '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+            'columnBreak="0" merged="0"><hp:run charPrIDRef="%s">%s</hp:run>'
+            '</hp:p>' % (pid, char_id, pic))
+        new_xml = apply_splices(xml, [(p_el.end, p_el.end, new_para)])
+        where = "block"
+
+    replacements = {name: new_xml.encode("utf-8"),
+                    hpf_name: _register_manifest(buf, hpf_name, item_id,
+                                                 entry, ext)}
+    out = add_and_patch_zip(buf, replacements, {entry: data})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return {"section": name, "placement": where, "item_id": item_id,
+            "entry": entry, "width_mm": round(w_hwp / HWPUNIT_PER_MM, 2),
+            "height_mm": round(h_hwp / HWPUNIT_PER_MM, 2),
+            "modified_entries": sorted(replacements),
+            "added_entries": [entry]}
+
+
 # ─── 표 구조/스타일 in-place op (claw-hwp hwpx-edit.js 포팅) ──────────
 #
 # 기존 표의 '모양'을 바꾼다. claw-hwp의 set_cell_background/set_cell_border/
@@ -2851,6 +3355,37 @@ def main():
                       help="줄간격 퍼센트 (예: 160)")
     p_ps.add_argument("--section", type=int, default=0)
 
+    p_seal = sub.add_parser(
+        "place-seal", help="기준 문구 옆에 떠있는 직인/서명 그림 삽입")
+    p_seal.add_argument("input")
+    p_seal.add_argument("output")
+    p_seal.add_argument("--image", required=True,
+                        help="직인/서명 PNG·JPG 경로(사용자 제공)")
+    p_seal.add_argument("--anchor", required=True,
+                        help='기준 문구(예: 발신명의·"서명 또는 인")')
+    p_seal.add_argument("--size-mm", type=float, default=SEAL_DEFAULT_MM,
+                        dest="size_mm", help="직인 세로 크기 mm (기본 20)")
+    p_seal.add_argument("--dx-mm", type=float, default=0.0, dest="dx_mm",
+                        help="가로 미세조정 mm (오른쪽+)")
+    p_seal.add_argument("--dy-mm", type=float, default=0.0, dest="dy_mm",
+                        help="세로 미세조정 mm (아래+)")
+    p_seal.add_argument("--occurrence", type=int, default=0,
+                        help="같은 문구가 여러 곳이면 몇 번째(0-base)")
+
+    p_img = sub.add_parser(
+        "insert-image", help="일반 이미지 삽입 (블록 또는 --inline)")
+    p_img.add_argument("input")
+    p_img.add_argument("output")
+    p_img.add_argument("--image", required=True, help="이미지 PNG·JPG 경로")
+    p_img.add_argument("--after", help="기준 문구(이 문단 뒤/끝에 삽입)")
+    p_img.add_argument("--para", type=int,
+                       help="문단 인덱스(0-base, 음수=뒤에서)")
+    p_img.add_argument("--inline", action="store_true",
+                       help="기준 문단 끝에 글자처럼 삽입(기본은 새 문단 블록)")
+    p_img.add_argument("--size-mm", type=float, nargs="+", dest="size_mm",
+                       help="크기 mm: 폭만 또는 '폭 높이'. 미지정 시 원본 크기")
+    p_img.add_argument("--section", type=int, default=0)
+
     args = parser.parse_args()
 
     def _parse_para(v):
@@ -3057,6 +3592,29 @@ def main():
                 args.input, args.output, after=args.after,
                 para=_parse_para(args.para), align=args.align,
                 line_spacing=args.line_spacing, section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "place-seal":
+            info = place_seal_hwpx(
+                args.input, args.output, image=args.image, anchor=args.anchor,
+                size_mm=args.size_mm, dx_mm=args.dx_mm, dy_mm=args.dy_mm,
+                occurrence=args.occurrence)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "insert-image":
+            sz = args.size_mm
+            if sz is not None and len(sz) > 2:
+                raise ValueError("--size-mm은 값 1개(폭) 또는 2개(폭 높이)")
+            width_mm = sz[0] if sz else None
+            height_mm = sz[1] if sz and len(sz) >= 2 else None
+            info = insert_image_hwpx(
+                args.input, args.output, image=args.image, after=args.after,
+                para=args.para, inline=args.inline, width_mm=width_mm,
+                height_mm=height_mm, section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
