@@ -554,6 +554,23 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/secure_fill.py" shred profile.json         
 - ⚠️ **프로필 파일을 `cat`/출력하지 말 것** — PII 누출. 기본 ephemeral, 작업 후 `--shred-profile` 또는 `shred` 권장.
   전화/주민번호/날짜는 칸 모양에 맞춰 자동 변환(값·변환값 모두 비출력). `shred`는 cwd·홈·임시 디렉토리 밖 경로는 거부.
 
+### 글자/문단 서식: `set-text-style` / `set-para-style`
+
+기존 본문 문단의 글자모양(charPr)·문단모양(paraPr)을 바꾼다. 대상 문단의 현재
+모양을 복제·변형한 새 모양을 header.xml에 추가(itemCnt 보정)하고 IDRef를 그쪽으로
+바꾼다 — 대상 문단만 영향, 나머지 보존. 대상은 `--after "문구"` 또는 `--para N`
+(0-base, `last`/`-1`=마지막; 미지정 시 마지막 문단).
+
+```bash
+# 글자: 굵게/기울임/밑줄 + 색(RRGGBB) + 크기(pt)
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-text-style doc.hwpx out.hwpx --after "제목 문구" --bold --color C00000 --size 16
+# 문단: 정렬 + 줄간격(%)
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-para-style doc.hwpx out.hwpx --after "제목 문구" --align center --line-spacing 180
+```
+
+- 글자모양은 대상 문단 첫 run의 charPr를 기준으로 복제하므로 글꼴/크기 계열이 유지된다(요청한 항목만 변경). 한 문단의 모든 run에 적용된다.
+- ⚠️ 문단모양은 복제·변형 방식이라 **한컴오피스 데스크톱에선 유지되지만 한컴독스(웹) 라운드트립 시 정렬이 초기화**될 수 있다(claw 동일 한계). 데스크톱 산출물엔 문제없다.
+
 ### 좌표 지정 폴백: `fill --cells`
 
 라벨 휴리스틱이 안 통하는 복잡한 표는 `analyze`가 보고한 좌표로 직접 채운다.
@@ -614,6 +631,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | 머리말/꼬리말/쪽번호 사후 추가·제거 | **J `set-header`/`set-footer`/`set-pagenum`/`remove-*`** |
 | 표 셀 배경/테두리·열추가·행삭제·셀병합 | **J `set-cell`/`add-col`/`del-row`/`merge-cells`** |
 | 수식 삽입(본문/셀) | **J `add-equation`** (문법: references/equation-syntax.md) |
+| 본문 글자/문단 서식(굵게·색·크기·정렬·줄간격) | **J `set-text-style`/`set-para-style`** |
 | 개인정보(주민번호·계좌) 양식 채우기 | **`secure_fill.py`** (PII 비경유) |
 | 라벨 매칭 실패한 복잡한 표 | **J `fill --cells`** (좌표 지정) |
 | XML 전역 일괄 치환 (메타데이터 포함) | F (clone_form.py) |

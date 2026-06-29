@@ -2459,6 +2459,222 @@ def _table_op_doc(src, dst, section_idx, fn):
     return name, extra
 
 
+# ─── 글자/문단 서식 in-place (claw-hwp apply_text_style/paragraph_style 포팅) ─
+#
+# 기존 .hwpx 본문 문단의 글자모양(charPr)·문단모양(paraPr)을 바꾼다. 대상 문단의
+# 현재 charPr/paraPr를 복제해 요청한 변경을 적용한 새 모양을 header.xml에 추가
+# (itemCnt 보정)하고, 문단의 run charPrIDRef / 문단 paraPrIDRef를 그쪽으로 바꾼다.
+# 복제 기반이라 대상 문단만 영향을 받고 나머지는 보존된다. 수정 문단의 stale
+# linesegarray는 제거(한컴이 재계산). bold/italic은 <hh:underline> 앞에 둔다(한컴 순서).
+
+_ALIGN_MAP = {"left": "LEFT", "center": "CENTER", "right": "RIGHT",
+              "justify": "JUSTIFY", "both": "BOTH"}
+
+
+def _set_open_attr(open_tag, attr, value):
+    """여는 태그(끝이 '>')의 attr를 교체 또는 추가."""
+    if re.search(r'\b%s="[^"]*"' % attr, open_tag):
+        return re.sub(r'\b%s="[^"]*"' % attr,
+                      '%s="%s"' % (attr, value), open_tag, count=1)
+    return open_tag[:-1] + ' %s="%s">' % (attr, value)
+
+
+def _elem_by_id(header_xml, tag, eid):
+    """header.xml에서 id=eid인 <hh:tag>의 (open_tag, inner) 반환."""
+    root = scan_xml(header_xml)
+    for el in descendants(root, tag):
+        m = re.search(r'\bid="(\d+)"', header_xml[el.start:el.open_end])
+        if m and m.group(1) == str(eid):
+            return (header_xml[el.start:el.open_end],
+                    header_xml[el.content_start:el.content_end])
+    return None, None
+
+
+def _add_cloned(header_xml, list_tag, item_tag, base_id, mutate):
+    """base_id 모양을 복제·변형해 list_tag에 추가하고 itemCnt +1. (new_id, header)."""
+    open_tag, inner = _elem_by_id(header_xml, item_tag, base_id)
+    if open_tag is None:
+        open_tag, inner = _elem_by_id(header_xml, item_tag, "0")
+    if open_tag is None:
+        raise ValueError("header.xml에 <hh:%s>가 없습니다" % item_tag)
+    root = scan_xml(header_xml)
+    lst = next(iter(descendants(root, list_tag)), None)
+    if lst is None:
+        raise ValueError("header.xml에 <hh:%s>가 없습니다" % list_tag)
+    ids = []
+    for el in descendants(lst, item_tag):
+        m = re.search(r'\bid="(\d+)"', header_xml[el.start:el.open_end])
+        if m:
+            ids.append(int(m.group(1)))
+    new_id = (max(ids) + 1) if ids else 0
+    new_open = re.sub(r'\bid="\d+"', 'id="%d"' % new_id, open_tag, count=1)
+    new_open, new_inner = mutate(new_open, inner)
+    new_el = new_open + new_inner + "</hh:%s>" % item_tag
+    splices = [(lst.content_end, lst.content_end, new_el)]
+    seg = header_xml[lst.start:lst.open_end]
+    m = re.search(r'itemCnt="(\d+)"', seg)
+    if m:
+        splices.append((lst.start + m.start(), lst.start + m.end(),
+                        'itemCnt="%d"' % (int(m.group(1)) + 1)))
+    return str(new_id), apply_splices(header_xml, splices)
+
+
+def _mutate_charpr(bold, italic, underline, color, size_pt):
+    def m(open_tag, inner):
+        if size_pt is not None:
+            open_tag = _set_open_attr(open_tag, "height",
+                                      str(int(round(float(size_pt) * 100))))
+        if color:
+            open_tag = _set_open_attr(open_tag, "textColor",
+                                      "#" + str(color).lstrip("#").upper())
+
+        def ins_before_underline(s, tag):
+            if re.search(r'<%s\b' % tag.replace(":", r"\:"), s):
+                return s
+            um = re.search(r'<hh:underline\b', s)
+            snip = "<%s/>" % tag
+            return (s[:um.start()] + snip + s[um.start():]) if um else s + snip
+        if bold:
+            inner = ins_before_underline(inner, "hh:bold")
+        if italic:
+            inner = ins_before_underline(inner, "hh:italic")
+        if underline:
+            ul = '<hh:underline type="BOTTOM" shape="SOLID" color="#000000"/>'
+            inner = (re.sub(r'<hh:underline\b[^>]*/>', ul, inner, count=1)
+                     if re.search(r'<hh:underline\b[^>]*/>', inner)
+                     else inner + ul)
+        return open_tag, inner
+    return m
+
+
+def _mutate_parapr(align, line_spacing):
+    def m(open_tag, inner):
+        if align:
+            al = _ALIGN_MAP[align.lower()]
+            if re.search(r'<hh:align\b[^>]*\bhorizontal="[^"]*"', inner):
+                inner = re.sub(r'(<hh:align\b[^>]*\bhorizontal=")[^"]*(")',
+                               lambda mm: mm.group(1) + al + mm.group(2),
+                               inner, count=1)
+        if line_spacing is not None:
+            if re.search(r'<hh:lineSpacing\b[^>]*\bvalue="[^"]*"', inner):
+                inner = re.sub(r'(<hh:lineSpacing\b[^>]*\bvalue=")[^"]*(")',
+                               lambda mm: mm.group(1) + str(line_spacing)
+                               + mm.group(2), inner, count=1)
+                inner = re.sub(r'(<hh:lineSpacing\b[^>]*\btype=")[^"]*(")',
+                               lambda mm: mm.group(1) + "PERCENT" + mm.group(2),
+                               inner, count=1)
+        return open_tag, inner
+    return m
+
+
+def _resolve_target_para(names, xmls, after, para, section_idx):
+    """(section_name, section_xml, para_el) — --after 문구 또는 --para 인덱스."""
+    if after is not None:
+        for n in names:
+            xml = xmls[n]
+            root = scan_xml(xml)
+            reg = Registry(xml)
+            for p in descendants(root, "p"):
+                if not _para_not_in_table(p):
+                    continue
+                full = "".join(tn.text for tn in own_tnodes(p, reg))
+                if after in full:
+                    return n, xml, p
+        raise ValueError("기준 문구를 찾을 수 없음: %r" % after)
+    if section_idx >= len(names):
+        raise ValueError("섹션 인덱스 초과: %d" % section_idx)
+    n = names[section_idx]
+    xml = xmls[n]
+    _, paras = _body_paragraphs(scan_xml(xml))
+    if not paras:
+        raise ValueError("첫 섹션에 본문 문단(<hp:p>)이 없습니다")
+    idx = -1 if para is None else para
+    try:
+        return n, xml, paras[idx]
+    except IndexError:
+        raise ValueError("문단 인덱스 초과: %d (문단 %d개)" % (idx, len(paras)))
+
+
+def _strip_para_linesegs(section_xml, para, splices):
+    for lsa in descendants(para, "linesegarray"):
+        if not ancestor_within(lsa, ("p",), para):
+            splices.append((lsa.start, lsa.end, ""))
+
+
+def set_text_style_hwpx(src, dst, after=None, para=None, bold=False,
+                        italic=False, underline=False, color=None,
+                        size_pt=None, section_idx=0):
+    """대상 문단의 모든 run에 글자모양(굵게/기울임/밑줄/색/크기) 적용."""
+    if not (bold or italic or underline or color or size_pt is not None):
+        raise ValueError("스타일(--bold/--italic/--underline/--color/--size) 중 "
+                         "하나는 지정해야 합니다")
+    buf, names, xmls, header_xml = _load_doc(src)
+    if header_xml is None:
+        raise ValueError("header.xml이 없습니다")
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        header_name = next((n for n in zf.namelist()
+                            if _HEADER_XML_RE.search(n)), None)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    runs = [r for r in descendants(para_el, ("run", "r"))
+            if not under_tbl_within(r, para_el)]
+    base_cid = "0"
+    for r in runs:
+        m = re.search(r'charPrIDRef="(\d+)"', sec_xml[r.start:r.open_end])
+        if m:
+            base_cid = m.group(1)
+            break
+    new_id, new_header = _add_cloned(
+        header_xml, "charProperties", "charPr", base_cid,
+        _mutate_charpr(bold, italic, underline, color, size_pt))
+    splices = []
+    for r in runs:
+        seg = sec_xml[r.start:r.open_end]
+        m = re.search(r'charPrIDRef="\d+"', seg)
+        if m:
+            splices.append((r.start + m.start(), r.start + m.end(),
+                            'charPrIDRef="%s"' % new_id))
+    _strip_para_linesegs(sec_xml, para_el, splices)
+    new_sec = apply_splices(sec_xml, splices)
+    _write_doc(buf, dst, {header_name: new_header, sec_name: new_sec})
+    return {"action": "text-style", "section": sec_name, "charPrId": new_id,
+            "runs": len(runs),
+            "applied": {"bold": bold, "italic": italic, "underline": underline,
+                        "color": color, "size_pt": size_pt}}
+
+
+def set_para_style_hwpx(src, dst, after=None, para=None, align=None,
+                        line_spacing=None, section_idx=0):
+    """대상 문단의 문단모양(정렬/줄간격) 적용."""
+    if not align and line_spacing is None:
+        raise ValueError("--align 또는 --line-spacing 중 하나는 지정해야 합니다")
+    if align and align.lower() not in _ALIGN_MAP:
+        raise ValueError("--align은 %s 중 하나" % "/".join(_ALIGN_MAP))
+    buf, names, xmls, header_xml = _load_doc(src)
+    if header_xml is None:
+        raise ValueError("header.xml이 없습니다")
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        header_name = next((n for n in zf.namelist()
+                            if _HEADER_XML_RE.search(n)), None)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    m = re.search(r'paraPrIDRef="(\d+)"', sec_xml[para_el.start:para_el.open_end])
+    base_pid = m.group(1) if m else "0"
+    new_id, new_header = _add_cloned(
+        header_xml, "paraProperties", "paraPr", base_pid,
+        _mutate_parapr(align, line_spacing))
+    splices = []
+    m = re.search(r'paraPrIDRef="\d+"', sec_xml[para_el.start:para_el.open_end])
+    if m:
+        splices.append((para_el.start + m.start(), para_el.start + m.end(),
+                        'paraPrIDRef="%s"' % new_id))
+    _strip_para_linesegs(sec_xml, para_el, splices)
+    new_sec = apply_splices(sec_xml, splices)
+    _write_doc(buf, dst, {header_name: new_header, sec_name: new_sec})
+    return {"action": "para-style", "section": sec_name, "paraPrId": new_id,
+            "applied": {"align": align, "line_spacing": line_spacing}}
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -2609,7 +2825,38 @@ def main():
         _p.add_argument("input")
         _p.add_argument("output")
 
+    p_ts = sub.add_parser("set-text-style",
+                          help="글자모양 적용(굵게/기울임/밑줄/색/크기)")
+    p_ts.add_argument("input")
+    p_ts.add_argument("output")
+    p_ts.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_ts.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막). "
+                                     "--after/--para 미지정 시 마지막 문단")
+    p_ts.add_argument("--bold", action="store_true", help="굵게")
+    p_ts.add_argument("--italic", action="store_true", help="기울임")
+    p_ts.add_argument("--underline", action="store_true", help="밑줄")
+    p_ts.add_argument("--color", help="글자색 RRGGBB (예: FF0000)")
+    p_ts.add_argument("--size", type=float, help="글자 크기(pt)")
+    p_ts.add_argument("--section", type=int, default=0)
+
+    p_ps = sub.add_parser("set-para-style", help="문단모양 적용(정렬/줄간격)")
+    p_ps.add_argument("input")
+    p_ps.add_argument("output")
+    p_ps.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_ps.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막)")
+    p_ps.add_argument("--align",
+                      choices=["left", "center", "right", "justify", "both"],
+                      help="가로 정렬")
+    p_ps.add_argument("--line-spacing", type=int, dest="line_spacing",
+                      help="줄간격 퍼센트 (예: 160)")
+    p_ps.add_argument("--section", type=int, default=0)
+
     args = parser.parse_args()
+
+    def _parse_para(v):
+        if v is None:
+            return None
+        return -1 if str(v).lower() == "last" else int(v)
 
     def load_values(spec):
         if spec == "-":
@@ -2791,6 +3038,25 @@ def main():
         if args.command in ("remove-header", "remove-footer"):
             kind = "header" if args.command == "remove-header" else "footer"
             info = remove_header_footer_hwpx(args.input, args.output, kind)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "set-text-style":
+            info = set_text_style_hwpx(
+                args.input, args.output, after=args.after,
+                para=_parse_para(args.para), bold=args.bold, italic=args.italic,
+                underline=args.underline, color=args.color, size_pt=args.size,
+                section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "set-para-style":
+            info = set_para_style_hwpx(
+                args.input, args.output, after=args.after,
+                para=_parse_para(args.para), align=args.align,
+                line_spacing=args.line_spacing, section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0

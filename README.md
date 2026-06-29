@@ -123,6 +123,10 @@ python3 scripts/fill_hwpx.py merge-cells doc.hwpx out.hwpx --table 0 --row 0 --c
 # 네이티브 수식 삽입 (문법: references/equation-syntax.md)
 python3 scripts/fill_hwpx.py add-equation doc.hwpx out.hwpx --after "기준 문구" --script "x^2+y^2=z^2"
 
+# 본문 글자/문단 서식 (굵게·색·크기·정렬·줄간격)
+python3 scripts/fill_hwpx.py set-text-style doc.hwpx out.hwpx --after "제목 문구" --bold --color C00000 --size 16
+python3 scripts/fill_hwpx.py set-para-style doc.hwpx out.hwpx --after "제목 문구" --align center --line-spacing 180
+
 # 개인정보(PII) 비경유 양식 채우기 — 값이 stdout/로그/모델 컨텍스트를 안 거침
 python3 scripts/secure_fill.py fill form.hwpx out.hwpx --profile profile.json --shred-profile
 
