@@ -1886,6 +1886,579 @@ def remove_header_footer_hwpx(src, dst, kind):
             "sections": list(changed)}
 
 
+# ─── 네이티브 수식 삽입 (claw-hwp hwpx-edit.js buildEquationXml 포팅) ──
+#
+# 수식은 자기완결 <hp:equation> 봉투다 — font 속성을 객체에 내장하므로
+# header.xml charPr/BinData/매니페스트 등록이 전혀 필요 없다(외부 의존 0).
+# <hp:script>의 수식 문자열은 한컴 수식 편집기 문법(references/equation-syntax.md)
+# 이며 escape_text로 이스케이프해 그대로 삽입한다. <hp:sz>는 한컴이 script로
+# 재계산하는 렌더 힌트. treatAsChar="1"로 인라인 배치(글자처럼 흐름).
+# claw가 한컴독스 라운드트립으로 검증한 봉투 구조/속성을 임의 변형 없이 따른다.
+
+EQUATION_DEFAULT_W = 9200   # <hp:sz> 폭 힌트 (한컴이 script로 재계산)
+EQUATION_DEFAULT_H = 2588   # <hp:sz> 높이 힌트
+EQUATION_DEFAULT_BASE_UNIT = 1000  # 폰트 크기 (1000 ≈ 10pt)
+
+
+def _fresh_ids(xml, count):
+    """섹션에서 아직 쓰이지 않은 최소 양의 정수 id를 count개 (오름차순).
+
+    실제 한컴 저장본 id는 거대 난수라 max+1은 32비트 오버플로 위험이 있다 —
+    미사용 최소값을 쓰면 항상 안전한 범위에 들고 문서 내 유일성도 보장된다.
+    """
+    used = set(re.findall(r'\bid="(\d+)"', xml))
+    ids, i = [], 1
+    while len(ids) < count:
+        if str(i) not in used:
+            ids.append(i)
+        i += 1
+    return ids
+
+
+def _equation_xml(script, eq_id, width=EQUATION_DEFAULT_W,
+                  height=EQUATION_DEFAULT_H,
+                  base_unit=EQUATION_DEFAULT_BASE_UNIT):
+    """인라인 <hp:equation> 봉투 (claw buildEquationXml 1:1 포팅).
+
+    eq_id는 문서 내 유일한 정수 id. script는 escape_text로 이스케이프된다.
+    """
+    return (
+        '<hp:equation id="%d" zOrder="0" numberingType="EQUATION" '
+        'textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" '
+        'dropcapstyle="None" version="Equation Version 60" baseLine="71" '
+        'textColor="#000000" baseUnit="%d" lineMode="CHAR" font="HancomEQN">'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" '
+        'heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" '
+        'allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" '
+        'vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+        '<hp:outMargin left="56" right="56" top="0" bottom="0"/>'
+        '<hp:script>%s</hp:script></hp:equation>'
+        % (eq_id, base_unit, width, height, escape_text(script))
+    )
+
+
+def _para_not_in_table(el):
+    p = el.parent
+    while p is not None:
+        if p.name == "tbl":
+            return False
+        p = p.parent
+    return True
+
+
+def add_equation_after(xml, after, script, width, height, base_unit):
+    """기준 문구가 든 본문 문단 뒤에 수식 전용 새 문단을 삽입.
+
+    수식은 자체 PLAIN 문단(paraPrIDRef="0")에 둔다 — 앵커 문단이 목록/번호
+    머리(▶, "3.")를 가져도 그것을 물려받지 않게(claw opInsertEquation과 동일).
+    charPrIDRef만 앵커에서 빌려 폰트 정합을 맞춘다.
+    """
+    root = scan_xml(xml)
+    reg = Registry(xml)
+    target = None
+    for p_el in descendants(root, "p"):
+        if not _para_not_in_table(p_el):
+            continue
+        full = "".join(tn.text for tn in own_tnodes(p_el, reg))
+        if after in full:
+            target = p_el
+            break
+    if target is None:
+        raise ValueError("기준 문구를 찾을 수 없음: %r" % after)
+    ids = _fresh_ids(xml, 2)
+    eq = _equation_xml(script, ids[1], width, height, base_unit)
+    m = re.search(r'charPrIDRef="(\d+)"', xml[target.start:target.end])
+    char_id = m.group(1) if m else "0"
+    new_para = (
+        '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0"><hp:run charPrIDRef="%s">%s</hp:run></hp:p>'
+        % (ids[0], char_id, eq))
+    return apply_splices(xml, [(target.end, target.end, new_para)])
+
+
+def add_equation_in_cell(xml, table, row, col, script, width, height,
+                         base_unit):
+    """표 셀(table/row/col)의 첫 문단 끝에 인라인 수식 run을 추가.
+
+    좌표 모델은 fill --cells와 동일: table은 문서순서(중첩표 포함), row/col은
+    cellAddr. 셀의 첫 문단 charPrIDRef를 빌려 새 <hp:run>으로 감싸 삽입한다
+    (claw placeObjectInCell과 동일 — 기존 문단/내용 보존).
+    """
+    root = scan_xml(xml)
+    tables = list(descendants(root, "tbl"))
+    if table >= len(tables):
+        raise ValueError("표 인덱스 초과: %d (표 %d개)" % (table, len(tables)))
+    rows = direct_children(tables[table], "tr")
+    if row >= len(rows):
+        raise ValueError("행 인덱스 초과: %d (행 %d개)" % (row, len(rows)))
+    cells = direct_children(rows[row], "tc")
+    if col >= len(cells):
+        raise ValueError("열 인덱스 초과: %d (셀 %d개)" % (col, len(cells)))
+    paras = cell_paragraphs(cells[col])
+    if not paras:
+        raise ValueError("셀에 문단(<hp:p>)이 없어 수식을 삽입할 위치가 없음")
+    first_p = paras[0]
+    eq = _equation_xml(script, _fresh_ids(xml, 1)[0], width, height, base_unit)
+    m = re.search(r'charPrIDRef="(\d+)"',
+                  xml[first_p.content_start:first_p.content_end])
+    char_id = m.group(1) if m else "0"
+    run = '<hp:run charPrIDRef="%s">%s</hp:run>' % (char_id, eq)
+    return apply_splices(xml, [(first_p.content_end, first_p.content_end, run)])
+
+
+def add_equation_hwpx(src, dst, script, after=None, table=None, row=None,
+                      col=None, width=EQUATION_DEFAULT_W,
+                      height=EQUATION_DEFAULT_H,
+                      base_unit=EQUATION_DEFAULT_BASE_UNIT, section_idx=0):
+    """본문(--after) 또는 셀(--table/--row/--col)에 네이티브 수식 삽입."""
+    if not script or not str(script).strip():
+        raise ValueError("--script(수식 문자열)가 필요합니다")
+    if base_unit <= 0 or width <= 0 or height <= 0:
+        raise ValueError("--size 등 크기 값은 양의 정수여야 합니다")
+    in_cell = table is not None or row is not None or col is not None
+    if after is None and not in_cell:
+        raise ValueError("--after 또는 --table/--row/--col 중 하나를 지정하세요")
+    if after is not None and in_cell:
+        raise ValueError("--after와 --table/--row/--col은 함께 쓸 수 없습니다")
+    if in_cell and (table is None or row is None or col is None):
+        raise ValueError("셀 지정에는 --table/--row/--col 모두 필요합니다")
+    with open(src, "rb") as f:
+        buf = f.read()
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        sections = section_names(zf)
+        if not sections:
+            raise ValueError("HWPX에서 섹션 파일을 찾을 수 없습니다")
+        if section_idx >= len(sections):
+            raise ValueError("섹션 인덱스 초과: %d" % section_idx)
+        name = sections[section_idx]
+        xml = zf.read(name).decode("utf-8")
+    if after is not None:
+        new_xml = add_equation_after(xml, after, str(script),
+                                     width, height, base_unit)
+        where = {"mode": "after", "after": after}
+    else:
+        new_xml = add_equation_in_cell(xml, table, row, col, str(script),
+                                       width, height, base_unit)
+        where = {"mode": "cell", "table": table, "row": row, "col": col}
+    out = patch_zip_entries(buf, {name: new_xml.encode("utf-8")})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return name, where
+
+
+# ─── 표 구조/스타일 in-place op (claw-hwp hwpx-edit.js 포팅) ──────────
+#
+# 기존 표의 '모양'을 바꾼다. claw-hwp의 set_cell_background/set_cell_border/
+# append_table_column/delete_table_row/merge_cells를 순수 파이썬으로 직역하되,
+# 봉투(envelope) 구조/속성은 claw가 한컴 라운드트립으로 검증한 그대로 따른다.
+#
+# 좌표 모델: analyze/fill --cells와 동일 — --table은 해당 --section 안에서
+#   문서 순서(중첩표 포함) 인덱스. row/col은 <hp:cellAddr>(rowAddr/colAddr).
+# 원본보존: 변경한 section XML(+ set-cell은 header.xml)만 다시 쓴다.
+# rowSpan/colSpan 병합이 있는 표는 구조 op(add-col/del-row/merge)에서 좌표
+#   재계산이 불가하므로 명확히 거부(ValueError → exit 1)한다.
+
+# header.xml <hh:borderFill> 봉투 (claw BF_ATTRS / 실제 한컴 저장본과 동일)
+BF_OPEN_ATTRS = (' threeD="0" shadow="0" centerLine="NONE"'
+                 ' breakCellSeparateLine="0"')
+_BF_SLASH = ('<hh:slash type="NONE" Crooked="0" isCounter="0"/>'
+             '<hh:backSlash type="NONE" Crooked="0" isCounter="0"/>')
+_BF_BORDERS_NONE = (
+    '<hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/>'
+    '<hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>'
+    '<hh:topBorder type="NONE" width="0.1 mm" color="#000000"/>'
+    '<hh:bottomBorder type="NONE" width="0.1 mm" color="#000000"/>')
+_BF_DIAGONAL = '<hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>'
+DEFAULT_BF_INNER = _BF_SLASH + _BF_BORDERS_NONE + _BF_DIAGONAL
+
+_HEX_RE = re.compile(r"[0-9A-Fa-f]{6}")
+
+
+def _norm_hex(c):
+    """RRGGBB → #RRGGBB (대문자). 6자리 16진수가 아니면 오류."""
+    s = str(c).lstrip("#")
+    if not re.fullmatch(_HEX_RE, s):
+        raise ValueError("색은 RRGGBB 6자리 16진수여야 합니다 (예: FFE600)")
+    return "#" + s.upper()
+
+
+def _cell_addr(xml, tc):
+    """tc 자신의 <hp:cellAddr> rowAddr/colAddr (중첩표 것 제외)."""
+    ca = next((c for c in descendants(tc, "cellAddr")
+               if not under_tbl_within(c, tc)), None)
+    if ca is None:
+        return None, None
+    seg = xml[ca.start:ca.open_end]
+    r = re.search(r'rowAddr="(\d+)"', seg)
+    c = re.search(r'colAddr="(\d+)"', seg)
+    return (int(r.group(1)) if r else None, int(c.group(1)) if c else None)
+
+
+def _addr_map(xml, tbl):
+    """(rowAddr, colAddr) → tc (표의 직접 셀만, 중첩표 제외)."""
+    out = {}
+    for tr in direct_children(tbl, "tr"):
+        for tc in direct_children(tr, "tc"):
+            ra, ca = _cell_addr(xml, tc)
+            if ra is not None and ca is not None:
+                out[(ra, ca)] = tc
+    return out
+
+
+def _find_cell(xml, tbl, row, col):
+    """cellAddr (row,col) 셀을 찾고, 없으면 위치 인덱스로 폴백."""
+    tc = _addr_map(xml, tbl).get((row, col))
+    if tc is not None:
+        return tc
+    trs = direct_children(tbl, "tr")
+    if 0 <= row < len(trs):
+        tcs = direct_children(trs[row], "tc")
+        if 0 <= col < len(tcs):
+            return tcs[col]
+    return None
+
+
+def _table_has_spans(xml, tbl):
+    """표의 직접 셀에 colSpan/rowSpan>1 병합이 있는지 (중첩표 제외)."""
+    for tr in direct_children(tbl, "tr"):
+        for tc in direct_children(tr, "tc"):
+            cs = next((c for c in descendants(tc, "cellSpan")
+                       if not under_tbl_within(c, tc)), None)
+            if cs is None:
+                continue
+            seg = xml[cs.start:cs.open_end]
+            for attr in ("colSpan", "rowSpan"):
+                m = re.search(r'%s="(\d+)"' % attr, seg)
+                if m and int(m.group(1)) != 1:
+                    return True
+    return False
+
+
+def _get_table(xml, table_idx):
+    """section XML을 스캔해 (root, tbl) 반환. 인덱스는 문서순서(중첩표 포함)."""
+    root = scan_xml(xml)
+    tables = list(descendants(root, "tbl"))
+    if table_idx < 0 or table_idx >= len(tables):
+        raise ValueError("표 인덱스 초과: %d (표 %d개)" % (table_idx, len(tables)))
+    return root, tables[table_idx]
+
+
+def _set_child_attr_splice(xml, owner, tag, attr, value, splices):
+    """owner 자신의 <tag>(중첩표 제외) 요소의 attr 정수값을 교체하는 splice 추가."""
+    el = next((c for c in descendants(owner, tag)
+               if not under_tbl_within(c, owner)), None)
+    if el is None:
+        return
+    seg = xml[el.start:el.open_end]
+    m = re.search(r'\b%s="\d+"' % attr, seg)
+    if m:
+        splices.append((el.start + m.start(), el.start + m.end(),
+                        '%s="%s"' % (attr, value)))
+
+
+def _bump_count(xml, tbl, attr, delta, splices):
+    """tbl 여는 태그의 rowCnt/colCnt 등을 delta만큼 보정하는 splice 추가."""
+    seg = xml[tbl.start:tbl.open_end]
+    m = re.search(r'\b%s="(\d+)"' % attr, seg)
+    if m:
+        new = max(0, int(m.group(1)) + delta)
+        splices.append((tbl.start + m.start(), tbl.start + m.end(),
+                        '%s="%s"' % (attr, new)))
+
+
+# ── header.xml borderFill 찾기/추가 ──────────────────────────────────
+
+def _bf_by_id(header_xml, bid):
+    """header.xml에서 id=bid인 <hh:borderFill>의 (inner, open_tag) 반환."""
+    root = scan_xml(header_xml)
+    for bf in descendants(root, "borderFill"):
+        m = re.search(r'\bid="(\d+)"', header_xml[bf.start:bf.open_end])
+        if m and m.group(1) == str(bid):
+            return (header_xml[bf.content_start:bf.content_end],
+                    header_xml[bf.start:bf.open_end])
+    return None, None
+
+
+def _ensure_borderfill(header_xml, want_inner, template_open=None):
+    """want_inner와 동일한 borderFill이 있으면 그 id를, 없으면 새로 추가하고
+    id를 반환. 새로 추가 시 <hh:borderFills itemCnt>를 +1 보정.
+
+    Returns: (id_str, new_header_xml). 재사용이면 new_header_xml == header_xml.
+    """
+    root = scan_xml(header_xml)
+    lists = list(descendants(root, "borderFills"))
+    if not lists:
+        raise ValueError("header.xml에 <hh:borderFills>가 없습니다")
+    bflist = lists[0]
+    ids = []
+    for bf in descendants(bflist, "borderFill"):
+        if under_tbl_within(bf, bflist):
+            continue
+        m = re.search(r'\bid="(\d+)"', header_xml[bf.start:bf.open_end])
+        if header_xml[bf.content_start:bf.content_end] == want_inner:
+            return m.group(1), header_xml  # 동일 borderFill 재사용
+        if m:
+            ids.append(int(m.group(1)))
+    new_id = (max(ids) + 1) if ids else 1
+    if template_open:
+        new_open = re.sub(r'\bid="\d+"', 'id="%d"' % new_id, template_open, count=1)
+    else:
+        new_open = '<hh:borderFill id="%d"%s>' % (new_id, BF_OPEN_ATTRS)
+    new_bf = new_open + want_inner + "</hh:borderFill>"
+    splices = [(bflist.content_end, bflist.content_end, new_bf)]
+    open_seg = header_xml[bflist.start:bflist.open_end]
+    m = re.search(r'itemCnt="(\d+)"', open_seg)
+    if m:
+        splices.append((bflist.start + m.start(), bflist.start + m.end(),
+                        'itemCnt="%d"' % (int(m.group(1)) + 1)))
+    return str(new_id), apply_splices(header_xml, splices)
+
+
+def _set_fill_inner(inner, hexc):
+    """borderFill inner에 <hc:fillBrush> 배경색을 설정(있으면 교체, 없으면 추가)."""
+    brush = ('<hc:fillBrush><hc:winBrush faceColor="%s" hatchColor="#999999"'
+             ' alpha="0"/></hc:fillBrush>' % hexc)
+    if "<hc:fillBrush" in inner:
+        return re.sub(r'<hc:fillBrush\b[^>]*/>|<hc:fillBrush\b.*?</hc:fillBrush>',
+                      brush, inner, count=1, flags=re.S)
+    return inner + brush
+
+
+def _set_border_inner(inner, on):
+    """4면 테두리를 SOLID(on) 또는 NONE(off)로 설정."""
+    for side in ("left", "right", "top", "bottom"):
+        if on:
+            new = ('<hh:%sBorder type="SOLID" width="0.4 mm" color="#000000"/>'
+                   % side)
+        else:
+            new = ('<hh:%sBorder type="NONE" width="0.1 mm" color="#000000"/>'
+                   % side)
+        pat = r'<hh:%sBorder\b[^>]*?/>' % side
+        if re.search(pat, inner):
+            inner = re.sub(pat, new, inner, count=1)
+        else:
+            inner = _BF_SLASH_split(inner, new)
+    return inner
+
+
+def _BF_SLASH_split(inner, border_tag):
+    """테두리 태그가 없을 때 backSlash 뒤(슬래시 다음)에 삽입 — 스키마 순서 유지."""
+    idx = inner.find("</hh:backSlash>")
+    if idx >= 0:
+        idx += len("</hh:backSlash>")
+        return inner[:idx] + border_tag + inner[idx:]
+    pos = inner.rfind("<hh:diagonal")
+    if pos >= 0:
+        return inner[:pos] + border_tag + inner[pos:]
+    return inner + border_tag
+
+
+def _header_name(buf):
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        return next((n for n in zf.namelist() if _HEADER_XML_RE.search(n)), None)
+
+
+def set_cell_style_hwpx(src, dst, table_idx, row, col,
+                        bg=None, border=None, section_idx=0):
+    """셀 배경색(--bg) 및/또는 테두리(--border on/off) 설정.
+
+    셀의 현재 borderFillIDRef가 가리키는 borderFill을 복제해 요청한 변경을
+    적용한 새 borderFill을 header.xml에 (없으면) 추가하고, 셀의 borderFillIDRef
+    를 그쪽으로 바꾼다. 같은 셀만 영향을 받으므로 다른 셀의 모양은 보존된다.
+
+    ★ claw 대비 의도적 분기: claw-hwp는 set_cell_background/border에 <hp:cellzone>
+    + char-shade를 쓰지만, 여기서는 셀 자신의 borderFillIDRef를 복제·변형한
+    borderFill로 repoint한다. 이는 실제 한컴 저장본이 셀 배경/테두리를 표현하는
+    네이티브 방식(borderFill의 fillBrush faceColor + per-side border)과 동일하다.
+    claw 재동기화 시 이 부분을 cellzone으로 '되돌리지' 말 것.
+    """
+    if bg is None and border is None:
+        raise ValueError("--bg 또는 --border 중 하나는 지정해야 합니다")
+    buf, names, xmls, header_xml = _load_doc(src)
+    if header_xml is None:
+        raise ValueError("header.xml을 찾을 수 없습니다")
+    if section_idx >= len(names):
+        raise ValueError("섹션 인덱스 초과: %d" % section_idx)
+    name = names[section_idx]
+    xml = xmls[name]
+    _, tbl = _get_table(xml, table_idx)
+    tc = _find_cell(xml, tbl, row, col)
+    if tc is None:
+        raise ValueError("셀을 찾을 수 없음: row=%d col=%d" % (row, col))
+    open_seg = xml[tc.start:tc.open_end]
+    m = re.search(r'borderFillIDRef="(\d+)"', open_seg)
+    cur_ref = m.group(1) if m else None
+    base_inner, base_open = (_bf_by_id(header_xml, cur_ref)
+                             if cur_ref else (None, None))
+    if base_inner is None:
+        base_inner, base_open = DEFAULT_BF_INNER, None
+    new_inner = base_inner
+    if bg is not None:
+        new_inner = _set_fill_inner(new_inner, _norm_hex(bg))
+    if border is not None:
+        new_inner = _set_border_inner(new_inner, bool(border))
+    new_id, new_header = _ensure_borderfill(header_xml, new_inner, base_open)
+
+    sp = []
+    if m:
+        sp.append((tc.start + m.start(), tc.start + m.end(),
+                   'borderFillIDRef="%s"' % new_id))
+    else:
+        ins = tc.open_end - 1  # 여는 태그 '>' 직전
+        sp.append((ins, ins, ' borderFillIDRef="%s"' % new_id))
+    changed = {name: apply_splices(xml, sp)}
+    if new_header != header_xml:
+        hname = _header_name(buf)
+        if hname is None:
+            raise ValueError("header.xml 엔트리를 찾을 수 없습니다")
+        changed[hname] = new_header
+    _write_doc(buf, dst, changed)
+    return {"table": table_idx, "row": row, "col": col, "section": section_idx,
+            "bg": _norm_hex(bg) if bg is not None else None,
+            "border": (None if border is None else bool(border)),
+            "borderFillIDRef": new_id, "modified_entries": sorted(changed)}
+
+
+# ── add-col / del-row / merge-cells ──────────────────────────────────
+
+def _clone_cell(frag, value, col_addr, next_pid):
+    """셀 조각 XML 복제 — 텍스트 교체(기본 빈칸) + colAddr 갱신 + 문단 id 고유화
+    + linesegarray 제거(복제 캐시는 항상 stale)."""
+    root = scan_xml(frag)
+    tc = root.children[0]
+    reg = Registry(frag)
+    replace_cell_text(tc, "" if value is None else str(value), reg)
+    splices = build_splices(frag, reg)
+    _strip_all_linesegarray(tc, splices)
+    for ca in descendants(tc, "cellAddr"):
+        if under_tbl_within(ca, tc):
+            continue
+        m = re.search(r'\bcolAddr="\d+"', frag[ca.start:ca.open_end])
+        if m:
+            splices.append((ca.start + m.start(), ca.start + m.end(),
+                            'colAddr="%d"' % col_addr))
+    for p_el in descendants(tc, "p"):
+        m = re.search(r'\bid="\d+"', frag[p_el.start:p_el.open_end])
+        if m:
+            splices.append((p_el.start + m.start(), p_el.start + m.end(),
+                            'id="%d"' % next_pid[0]))
+            next_pid[0] += 1
+    return apply_splices(frag, splices)
+
+
+def add_table_column(xml, table_idx, cells_values=None, at=None):
+    """표 끝(기본) 또는 --at 위치에 열 추가. 각 tr에 셀 1개씩 삽입,
+    colCnt +1, 새 셀 colAddr 정합(뒤 셀 colAddr +1), cellSz는 복제로 보존."""
+    _, tbl = _get_table(xml, table_idx)
+    if _table_has_spans(xml, tbl):
+        raise ValueError("colSpan/rowSpan 병합이 있는 표는 열 추가 미지원 — "
+                         "셀 좌표가 깨질 수 있어 거부합니다")
+    trs = direct_children(tbl, "tr")
+    if not trs:
+        raise ValueError("표에 행이 없습니다")
+    ncols = max(len(direct_children(tr, "tc")) for tr in trs)
+    insert_index = ncols if at is None else max(0, min(int(at), ncols))
+    max_id = 0
+    for m in re.finditer(r'\bid="(\d+)"', xml):
+        max_id = max(max_id, int(m.group(1)))
+    next_pid = [max_id + 1]
+
+    splices = []
+    for ri, tr in enumerate(trs):
+        tcs = direct_children(tr, "tc")
+        if not tcs:
+            continue
+        val = (cells_values[ri] if cells_values and ri < len(cells_values)
+               else None)
+        tmpl_idx = insert_index if insert_index < len(tcs) else len(tcs) - 1
+        template = tcs[tmpl_idx]
+        clone = _clone_cell(xml[template.start:template.end], val,
+                            insert_index, next_pid)
+        if insert_index < len(tcs):
+            pos = tcs[insert_index].start
+        else:
+            pos = tcs[-1].end
+        splices.append((pos, pos, clone))
+        for j in range(insert_index, len(tcs)):
+            _set_child_attr_splice(xml, tcs[j], "cellAddr", "colAddr",
+                                   j + 1, splices)
+    _bump_count(xml, tbl, "colCnt", +1, splices)
+    return apply_splices(xml, splices)
+
+
+def delete_table_row(xml, table_idx, row):
+    """행 삭제 — tr 제거, rowCnt -1, 뒤 행들의 cellAddr rowAddr -1."""
+    _, tbl = _get_table(xml, table_idx)
+    if _table_has_spans(xml, tbl):
+        raise ValueError("colSpan/rowSpan 병합이 있는 표는 행 삭제 미지원 — "
+                         "셀 좌표가 깨질 수 있어 거부합니다")
+    trs = direct_children(tbl, "tr")
+    if row < 0 or row >= len(trs):
+        raise ValueError("행 인덱스 초과: %d (행 %d개)" % (row, len(trs)))
+    splices = [(trs[row].start, trs[row].end, "")]
+    for i in range(row + 1, len(trs)):
+        for tc in direct_children(trs[i], "tc"):
+            _set_child_attr_splice(xml, tc, "cellAddr", "rowAddr",
+                                   i - 1, splices)
+    _bump_count(xml, tbl, "rowCnt", -1, splices)
+    return apply_splices(xml, splices)
+
+
+def merge_table_cells(xml, table_idx, row, col, row2, col2):
+    """사각범위 (row,col)~(row2,col2) 병합 — 앵커(좌상단) 셀에 colSpan/rowSpan
+    설정, 덮인 셀 제거. cellAddr 그리드는 그대로 두므로 rowCnt/colCnt 불변."""
+    r1, r2 = sorted((int(row), int(row2)))
+    c1, c2 = sorted((int(col), int(col2)))
+    if r1 == r2 and c1 == c2:
+        raise ValueError("병합 범위가 셀 1개입니다 (2개 이상 지정)")
+    _, tbl = _get_table(xml, table_idx)
+    if _table_has_spans(xml, tbl):
+        raise ValueError("이미 병합(colSpan/rowSpan)이 있는 표는 재병합 미지원 — "
+                         "셀 좌표가 깨질 수 있어 거부합니다")
+    amap = _addr_map(xml, tbl)
+    anchor = amap.get((r1, c1))
+    if anchor is None:
+        raise ValueError("앵커 셀 없음: row=%d col=%d" % (r1, c1))
+    missing = [(r, c) for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)
+               if (r, c) not in amap]
+    if missing:
+        raise ValueError("병합 범위에 없는 셀 좌표: %s" % missing)
+    splices = []
+    removed = 0
+    for r in range(r1, r2 + 1):
+        for c in range(c1, c2 + 1):
+            if r == r1 and c == c1:
+                continue
+            tc = amap[(r, c)]
+            splices.append((tc.start, tc.end, ""))
+            removed += 1
+    _set_child_attr_splice(xml, anchor, "cellSpan", "colSpan", c2 - c1 + 1,
+                           splices)
+    _set_child_attr_splice(xml, anchor, "cellSpan", "rowSpan", r2 - r1 + 1,
+                           splices)
+    for lsa in descendants(anchor, "linesegarray"):
+        if not under_tbl_within(lsa, anchor):
+            splices.append((lsa.start, lsa.end, ""))
+    return apply_splices(xml, splices), removed
+
+
+def _table_op_doc(src, dst, section_idx, fn):
+    """section을 열어 fn(xml)→new_xml(또는 (new_xml, extra))을 적용해 저장."""
+    buf, names, xmls, _ = _load_doc(src)
+    if section_idx >= len(names):
+        raise ValueError("섹션 인덱스 초과: %d" % section_idx)
+    name = names[section_idx]
+    result = fn(xmls[name])
+    extra = None
+    if isinstance(result, tuple):
+        new_xml, extra = result
+    else:
+        new_xml = result
+    _write_doc(buf, dst, {name: new_xml})
+    return name, extra
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -1954,6 +2527,46 @@ def main():
     p_fb.add_argument("output", nargs="?",
                       help="출력 경로 (생략 시 입력 파일 덮어쓰기)")
 
+    p_sc = sub.add_parser("set-cell",
+                          help="셀 배경색/테두리 설정 (header.xml borderFill)")
+    p_sc.add_argument("input")
+    p_sc.add_argument("output")
+    p_sc.add_argument("--table", type=int, required=True,
+                      help="표 인덱스 (해당 섹션 내 문서순서, 중첩표 포함)")
+    p_sc.add_argument("--row", type=int, required=True, help="cellAddr rowAddr")
+    p_sc.add_argument("--col", type=int, required=True, help="cellAddr colAddr")
+    p_sc.add_argument("--bg", help="배경색 RRGGBB (예: FFE600)")
+    p_sc.add_argument("--border", choices=["on", "off"],
+                      help="4면 테두리 on(SOLID)/off(NONE)")
+    p_sc.add_argument("--section", type=int, default=0)
+
+    p_ac = sub.add_parser("add-col", help="표에 열 추가 (끝 또는 --at)")
+    p_ac.add_argument("input")
+    p_ac.add_argument("output")
+    p_ac.add_argument("--table", type=int, required=True)
+    p_ac.add_argument("--at", type=int,
+                      help="삽입할 colAddr 위치 (생략 시 표 끝에 추가)")
+    p_ac.add_argument("--cells",
+                      help='새 열 셀 값 ["행0","행1",...] JSON (위→아래)')
+    p_ac.add_argument("--section", type=int, default=0)
+
+    p_dr = sub.add_parser("del-row", help="표 행 삭제")
+    p_dr.add_argument("input")
+    p_dr.add_argument("output")
+    p_dr.add_argument("--table", type=int, required=True)
+    p_dr.add_argument("--row", type=int, required=True, help="삭제할 행 인덱스")
+    p_dr.add_argument("--section", type=int, default=0)
+
+    p_mc = sub.add_parser("merge-cells", help="사각범위 셀 병합")
+    p_mc.add_argument("input")
+    p_mc.add_argument("output")
+    p_mc.add_argument("--table", type=int, required=True)
+    p_mc.add_argument("--row", type=int, required=True, help="앵커 rowAddr")
+    p_mc.add_argument("--col", type=int, required=True, help="앵커 colAddr")
+    p_mc.add_argument("--row2", type=int, required=True, help="범위 끝 rowAddr")
+    p_mc.add_argument("--col2", type=int, required=True, help="범위 끝 colAddr")
+    p_mc.add_argument("--section", type=int, default=0)
+
     for _cmd, _h in (("set-header", "머리말 삽입/갱신"),
                      ("set-footer", "꼬리말 삽입/갱신")):
         _p = sub.add_parser(_cmd, help=_h)
@@ -1965,6 +2578,22 @@ def main():
                              "(미지정 시 기존값 보존, 신규는 BOTH)")
         _p.add_argument("--align",
                         help="가로 정렬 LEFT/CENTER/RIGHT (best-effort)")
+
+    p_eq = sub.add_parser("add-equation",
+                          help="네이티브 수식 삽입 (본문 --after 또는 셀 좌표)")
+    p_eq.add_argument("input")
+    p_eq.add_argument("output")
+    p_eq.add_argument("--script", required=True,
+                      help="수식 문자열 (예: x^2+y^2=z^2). "
+                           "문법은 references/equation-syntax.md 참고")
+    p_eq.add_argument("--after",
+                      help="기준 문구 (이 문구가 있는 본문 문단 뒤에 새 문단으로)")
+    p_eq.add_argument("--table", type=int, help="표 인덱스 (셀에 삽입)")
+    p_eq.add_argument("--row", type=int, help="행 인덱스 (cellAddr rowAddr)")
+    p_eq.add_argument("--col", type=int, help="열 인덱스 (cellAddr colAddr)")
+    p_eq.add_argument("--size", type=int,
+                      help="폰트 크기 baseUnit (1000≈10pt, 기본 1000)")
+    p_eq.add_argument("--section", type=int, default=0)
 
     p_pn = sub.add_parser("set-pagenum", help="자동 쪽번호 삽입")
     p_pn.add_argument("input")
@@ -2086,12 +2715,70 @@ def main():
                     "ok": True})
             return 0
 
+        if args.command == "set-cell":
+            border = (None if args.border is None
+                      else args.border == "on")
+            info = set_cell_style_hwpx(args.input, args.output, args.table,
+                                       args.row, args.col, args.bg, border,
+                                       args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "add-col":
+            cells_values = load_values(args.cells) if args.cells else None
+            if cells_values is not None and not isinstance(cells_values, list):
+                print("오류: cells는 JSON 배열이어야 합니다", file=sys.stderr)
+                return 1
+            name, _ = _table_op_doc(
+                args.input, args.output, args.section,
+                lambda x: add_table_column(x, args.table, cells_values,
+                                           args.at))
+            _print({"input": args.input, "output": args.output,
+                    "table": args.table, "at": args.at,
+                    "modified_entries": [name], "ok": True})
+            return 0
+
+        if args.command == "del-row":
+            name, _ = _table_op_doc(
+                args.input, args.output, args.section,
+                lambda x: delete_table_row(x, args.table, args.row))
+            _print({"input": args.input, "output": args.output,
+                    "table": args.table, "row": args.row,
+                    "modified_entries": [name], "ok": True})
+            return 0
+
+        if args.command == "merge-cells":
+            name, removed = _table_op_doc(
+                args.input, args.output, args.section,
+                lambda x: merge_table_cells(x, args.table, args.row, args.col,
+                                            args.row2, args.col2))
+            _print({"input": args.input, "output": args.output,
+                    "table": args.table,
+                    "anchor": {"row": args.row, "col": args.col},
+                    "to": {"row": args.row2, "col": args.col2},
+                    "removed_cells": removed,
+                    "modified_entries": [name], "ok": True})
+            return 0
+
         if args.command in ("set-header", "set-footer"):
             kind = "header" if args.command == "set-header" else "footer"
             info = set_header_footer_hwpx(args.input, args.output, kind,
                                           args.text, args.apply, args.align)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
+            return 0
+
+        if args.command == "add-equation":
+            base_unit = (args.size if args.size is not None
+                         else EQUATION_DEFAULT_BASE_UNIT)
+            name, where = add_equation_hwpx(
+                args.input, args.output, args.script,
+                after=args.after, table=args.table, row=args.row,
+                col=args.col, base_unit=base_unit, section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    "script": args.script, **where,
+                    "modified_entries": [name], "ok": True})
             return 0
 
         if args.command == "set-pagenum":
