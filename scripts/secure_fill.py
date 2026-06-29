@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 # fill_hwpx.py 엔진을 in-process로 재사용 (값이 별도 프로세스/argv를 안 거치게).
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -332,6 +333,34 @@ def cmd_verify(args):
     return 0
 
 
+def _shred_roots():
+    roots = [os.getcwd(), os.path.expanduser("~"), tempfile.gettempdir(),
+             "/tmp", "/private/tmp"]
+    out = []
+    for r in roots:
+        try:
+            out.append(os.path.realpath(r))
+        except OSError:
+            pass
+    return out
+
+
+def _shred_allowed(path):
+    """cwd·홈·임시 디렉토리 하위 경로만 shred 허용 (claw secure-fill.mjs 가드 포팅).
+
+    shred는 파일을 0으로 덮어쓴 뒤 삭제하는 비가역 작업이라, 임의 경로 파괴를
+    막기 위해 화이트리스트 밖 경로는 거부한다.
+    """
+    try:
+        rp = os.path.realpath(path)
+    except OSError:
+        return False
+    for root in _shred_roots():
+        if rp == root or rp.startswith(root + os.sep):
+            return True
+    return False
+
+
 def _shred_path(path):
     """파일을 0으로 덮어쓴 뒤 unlink. 실패는 조용히 무시(메시지에 값 비포함)."""
     try:
@@ -354,13 +383,19 @@ def cmd_shred(args):
     for p in (args.profile or []):
         paths.append(p)
     shredded = []
+    refused = 0
     for p in paths:
+        if not _shred_allowed(p):
+            refused += 1
+            shredded.append({"path": p, "refused": True,
+                             "reason": "cwd·홈·임시 디렉토리 밖 경로는 shred 거부"})
+            continue
         existed = os.path.exists(p)
         _shred_path(p)
         shredded.append({"path": p, "existed": existed,
                          "gone": not os.path.exists(p)})
     _emit({"shredded": shredded})
-    return 0
+    return 2 if refused else 0
 
 
 # ─── argparse ────────────────────────────────────────────────────────

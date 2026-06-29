@@ -192,6 +192,12 @@ def main():
     check("shred 후 파일 삭제됨", not victim.exists())
     assert_no_pii("shred", so, se)
 
+    # 화이트리스트(cwd·홈·임시) 밖 경로는 거부 — 임의 파일 파괴 방지
+    code, rep, so, se = run("shred", "/etc/sf_refuse_probe", expect=2)
+    check("shred 화이트리스트 밖 경로 거부(exit 2)", code == 2)
+    check("거부 사유 표기",
+          bool(rep) and rep["shredded"][0].get("refused") is True)
+
     print("[9] fill --shred-profile — 채운 뒤 프로필 삭제")
     prof3 = tmp / "profile3.json"
     prof3.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")

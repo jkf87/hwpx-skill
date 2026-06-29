@@ -89,6 +89,14 @@ def main():
         check("--size → baseUnit 반영", 'baseUnit="1200"' in s2)
         check("셀 삽입 후 well-formed", _well_formed(s2))
 
+        # ── 2b) --size 0/음수 거부 ─────────────────────────────────
+        out_bad = d / "eq_badsize.hwpx"
+        code, _ = run("add-equation", form, out_bad,
+                      "--after", "입사 지원 신청서",
+                      "--script", "x^2", "--size", 0, expect=1)
+        check("--size 0 거부(exit 1)", code == 1)
+        check("--size 0 시 출력 미생성", not out_bad.exists())
+
         # ── 3) 이스케이프 (< > & 가 든 수식) ───────────────────────
         out3 = d / "eq_esc.hwpx"
         code, rep = run("add-equation", form, out3,
