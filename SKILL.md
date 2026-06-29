@@ -652,6 +652,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | **손상된 문서 대화상자** | `errors`: secPr에 pagePr/margin 누락·pageWidth 등 비표준 속성 | 정상 HWPX의 `<hp:secPr>...</hp:secPr>`을 이식. 애초에 정상 파일을 베이스로 작업 |
 | **빈 페이지로 열림** | `raw_llm_suspect: true`: 미리보기·줄배치 부재(한컴 미경유) | 정상 HWPX(한컴 저장본/워크플로우 H 변환본)를 베이스로 fill/replace. 또는 한컴에서 한 번 열어 저장 |
 | **모든 글자에 네모 테두리** | `char_border_bug: true`: charPr 다수가 SOLID 테두리 borderFill 참조 | `fill_hwpx.py fix-borders output.hwpx` 실행 후 재check |
+| **글자가 세로로 뒤집힘** | `vertical_misconvert: true`: 셀 textDirection이 대부분 VERTICAL (hwp2hwpx 오변환) | `convert_hwp.py`로 재변환(자동 보정 포함). 이미 변환된 파일은 textDirection VERTICAL→HORIZONTAL 교정 |
 
 > ⚠️ **이 게이트를 건너뛰면 안 된다.** 과거 사고가 전부 여기서 잡혔어야 했다:
 > 가짜 secPr(손상 문서), raw 파일(빈 페이지), 글자 테두리 — 셋 다 `check --strict`가

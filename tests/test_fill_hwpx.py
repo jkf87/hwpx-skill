@@ -109,6 +109,24 @@ def _break_secpr(src, dst):
                 zo.writestr(item, data, compress_type=ct)
 
 
+def _make_vertical(src, dst):
+    """셀 textDirection을 VERTICAL로 바꿔 'hwp2hwpx 세로 오변환' 상태 재현."""
+    import io
+    buf = src.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        names = [n for n in zf.namelist() if re.search(r"section\d+\.xml$", n)]
+        with zipfile.ZipFile(dst, "w") as zo:
+            for item in zf.infolist():
+                data = zf.read(item.filename)
+                if item.filename in names:
+                    data = data.decode("utf-8").replace(
+                        'textDirection="HORIZONTAL"',
+                        'textDirection="VERTICAL"').encode("utf-8")
+                ct = (zipfile.ZIP_STORED if item.filename == "mimetype"
+                      else zipfile.ZIP_DEFLATED)
+                zo.writestr(item, data, compress_type=ct)
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -325,6 +343,20 @@ def main():
         code, rep = run("remove-header", rmf, rmh)
         check("remove-header 제거",
               code == 0 and "<hp:header" not in sec0(rmh))
+
+        # ─ 세로쓰기 오변환 탐지 (check --strict가 잡아야) — 강사카드 사고 방지 ─
+        vbroken = d / "vbroken.hwpx"
+        _make_vertical(form, vbroken)
+        code, rep = run("check", vbroken, expect=0)
+        check("세로 오변환 탐지(vertical_misconvert)",
+              rep and rep.get("vertical_misconvert") is True,
+              f"(signals: {rep and rep.get('vertical_signals')})")
+        code, rep = run("check", vbroken, "--strict", expect=2)
+        check("check --strict 세로 오변환 차단", code == 2 and not rep["ok"])
+        # 정상(가로) 폼은 통과
+        code, rep = run("check", form, "--strict")
+        check("정상 가로 폼은 세로탐지 미발동",
+              code == 0 and not rep.get("vertical_misconvert"))
 
         # ─ 무매칭 → 원본 바이트 동일 ─
         nf = d / "nomatch.json"
