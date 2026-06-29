@@ -110,6 +110,12 @@ python3 scripts/fill_hwpx.py fill form.hwpx output.hwpx --values values.json
 # 값 삽입과 비변경 엔트리 보존 검증
 python3 scripts/fill_hwpx.py verify output.hwpx --values values.json --original form.hwpx
 
+# 머리말·꼬리말·자동 쪽번호 사후 삽입/제거 (원본 보존, 중복 방지)
+python3 scripts/fill_hwpx.py set-header doc.hwpx out.hwpx --text "대외주의" --align center
+python3 scripts/fill_hwpx.py set-footer doc.hwpx out.hwpx --text "한국연구재단"
+python3 scripts/fill_hwpx.py set-pagenum doc.hwpx out.hwpx --where footer --align center
+python3 scripts/fill_hwpx.py remove-header doc.hwpx out.hwpx
+
 # 한컴 열림 위험 신호까지 엄격 점검
 python3 scripts/fill_hwpx.py check output.hwpx --strict
 ```
@@ -171,6 +177,7 @@ hwpx-skill/
 │   ├── finalize_hwpx.py        # line cache removal, layout QA, Hancom open test
 │   ├── fill_hwpx.py            # 보존형 양식 필드 채우기
 │   ├── hwpx_guard_hook.py      # 배포 전 HWPX strict gate 보조 훅
+│   ├── report_placeholder_hook.py # '브라더 공기관' 예시 보고서 전달 차단 훅
 │   ├── text_extract.py         # 텍스트 추출
 │   ├── create_document.py      # 문서 생성
 │   ├── build_problem_answer_sheet.py # 문제지+답안지 2쪽 생성

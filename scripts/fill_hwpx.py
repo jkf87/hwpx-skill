@@ -1599,6 +1599,293 @@ def verify_hwpx(path, values, original=None):
     return report
 
 
+# ─── 머리말·꼬리말·쪽번호 in-place (claw-hwp hwpx-edit.js 포팅) ───────
+#
+# 머리말(hp:header)/꼬리말(hp:footer)은 섹션 본문(section*.xml) 안에서
+#   <hp:p><hp:run><hp:ctrl><hp:header applyPageType="BOTH">
+#     <hp:subList ...><hp:p paraPrIDRef="..">
+#       <hp:run charPrIDRef="0"><hp:t>텍스트</hp:t></hp:run></hp:p></hp:subList>
+#   </hp:header></hp:ctrl></hp:run></hp:p>
+# 형태로 존재한다. secPr를 품은 섹션 첫 문단 '뒤'에 새 문단으로 삽입한다.
+# 쪽번호는 머리말/꼬리말 문단 안에 <hp:autoNum numType="PAGE"> 컨트롤을 둔 것
+# (한컴이 실제 페이지 번호를 렌더). claw-hwp가 한컴독스 라운드트립으로 검증한
+# 봉투(envelope) 구조를 그대로 따른다 — DOM 재직렬화 없이 splice + ZIP 외과수술.
+
+HF_APPLY = {"BOTH", "EVEN", "ODD"}
+HF_ALIGN = {"LEFT", "CENTER", "RIGHT"}
+_HEADER_XML_RE = re.compile(r"[Hh]eader\.xml$")
+
+
+def _fresh_para_id(xml):
+    """섹션에서 아직 쓰이지 않은 최소 양의 정수 id (32비트 초과·충돌 방지).
+
+    실제 한컴 저장본의 문단 id는 2764991984 같은 거대 난수라 max+1은
+    오버플로 위험이 있다 — 미사용 최소값을 쓰면 항상 안전한 범위에 든다.
+    """
+    used = set(re.findall(r'\bid="(\d+)"', xml))
+    i = 1
+    while str(i) in used:
+        i += 1
+    return i
+
+
+def _aligned_parapr_id(header_xml, align):
+    """header.xml에서 요청한 가로 정렬을 이미 선언한 <hh:paraPr> id를 찾는다.
+
+    없으면 None — 호출부가 기본 paraPrIDRef='0'으로 폴백한다. header.xml에
+    새 paraPr를 주입하지 않는 best-effort 방식(주입 시 itemCnt 보정 실수가
+    '한컴 손상 문서' 사고로 이어지므로 회피). 정부 양식은 대개 CENTER/RIGHT
+    paraPr를 이미 보유해 충분히 동작한다.
+    """
+    if not header_xml:
+        return None
+    pat = re.compile(r'<hh:align\b[^>]*horizontal="%s"' % align)
+    root = scan_xml(header_xml)
+    for pp in descendants(root, "paraPr"):
+        if pat.search(header_xml[pp.content_start:pp.content_end]):
+            m = re.search(r'\bid="(\d+)"', header_xml[pp.start:pp.open_end])
+            if m:
+                return m.group(1)
+    return None
+
+
+def _resolve_align(header_xml, align):
+    """(paraPrIDRef, note) 반환. align 미지정/LEFT면 기본 '0'."""
+    if not align:
+        return "0", "default"
+    al = align.upper()
+    if al not in HF_ALIGN:
+        raise ValueError("align은 LEFT/CENTER/RIGHT 중 하나여야 합니다")
+    if al == "LEFT":
+        return "0", "LEFT(기본)"
+    found = _aligned_parapr_id(header_xml, al)
+    if found:
+        return found, al
+    return "0", "%s 요청했으나 header.xml에 일치 paraPr 없음 → 기본 정렬" % al
+
+
+def _hf_text_run(text):
+    return '<hp:run charPrIDRef="0"><hp:t>%s</hp:t></hp:run>' % escape_text(text)
+
+
+def _pagenum_run():
+    return ('<hp:run charPrIDRef="0"><hp:ctrl>'
+            '<hp:autoNum num="1" numType="PAGE">'
+            '<hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" '
+            'suffixChar="" supscript="0"/></hp:autoNum></hp:ctrl>'
+            '<hp:t/></hp:run>')
+
+
+def _hf_element(kind, apply, ppr, inner_runs):
+    """<hp:header>/<hp:footer> 요소 자체 (subList>p>runs)."""
+    vert = "TOP" if kind == "header" else "BOTTOM"
+    return (
+        '<hp:%s id="0" applyPageType="%s">'
+        '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" '
+        'vertAlign="%s" linkListIDRef="0" linkListNextIDRef="0" '
+        'textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+        '<hp:p id="0" paraPrIDRef="%s" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0">%s</hp:p>'
+        '</hp:subList></hp:%s>' % (kind, apply, vert, ppr, inner_runs, kind))
+
+
+def _hf_wrapper(xml, kind, apply, ppr, inner_runs):
+    """머리말/꼬리말 컨트롤을 담을 새 본문 문단 (한컴이 줄배치를 재생성하므로
+    linesegarray 없이 둔다)."""
+    return (
+        '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:ctrl>%s'
+        '</hp:ctrl></hp:run></hp:p>'
+        % (_fresh_para_id(xml), _hf_element(kind, apply, ppr, inner_runs)))
+
+
+def _body_paragraphs(root):
+    """섹션 컨테이너(<hs:sec>)의 최상위 <hp:p> 목록 + 컨테이너 요소."""
+    for top in root.children:
+        ps = direct_children(top, "p")
+        if ps:
+            return top, ps
+    return root, direct_children(root, "p")
+
+
+def _find_hf(root, kind):
+    """ctrl 안에 든 페이지 머리말/꼬리말 요소 목록 (문서 순서).
+
+    표 셀의 header="1" 속성 등과 혼동하지 않도록 부모가 <hp:ctrl>인 것만.
+    """
+    return [e for e in descendants(root, kind)
+            if e.parent is not None and e.parent.name == "ctrl"]
+
+
+def _load_doc(src):
+    with open(src, "rb") as f:
+        buf = f.read()
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        names = section_names(zf)
+        if not names:
+            raise ValueError("HWPX에서 섹션 파일을 찾을 수 없습니다")
+        xmls = {n: zf.read(n).decode("utf-8") for n in names}
+        header_xml = next((zf.read(h).decode("utf-8")
+                           for h in zf.namelist() if _HEADER_XML_RE.search(h)),
+                          None)
+    return buf, names, xmls, header_xml
+
+
+def _write_doc(src_buf, dst, changed):
+    if changed:
+        out = patch_zip_entries(src_buf, {n: x.encode("utf-8")
+                                          for n, x in changed.items()})
+    else:
+        out = src_buf  # 변경 없음 — 원본 바이트 그대로 복사
+    with open(dst, "wb") as f:
+        f.write(out)
+
+
+def set_header_footer_hwpx(src, dst, kind, text, apply=None, align=None):
+    """머리말/꼬리말 삽입 또는 갱신.
+
+    기존 머리말/꼬리말이 있으면 (한 문서에 여러 슬롯이 있어도) **전부** 같은
+    텍스트로 갱신한다 — 정부 양식은 머리말 슬롯을 2개 두기도 해서, 첫 개만
+    채우면 한컴이 다른 슬롯을 골라 일부 페이지에 안 보이는 사고가 난다.
+    apply=None이면 각 슬롯의 기존 applyPageType를 보존하고, align 미지정이면
+    기존 정렬을 보존한다(텍스트만 교체). 헤더 내부는 셀과 동형(subList>p>run>t)
+    이라 replace_cell_text를 재사용하며, 수정 문단의 stale linesegarray는
+    build_splices가 자동 제거한다.
+    """
+    if apply is not None:
+        apply = apply.upper()
+        if apply not in HF_APPLY:
+            raise ValueError("applyPageType는 BOTH/EVEN/ODD 중 하나여야 합니다")
+    buf, names, xmls, header_xml = _load_doc(src)
+    ppr, note = _resolve_align(header_xml, align)
+    changed = {}
+    updated = 0
+    for n in names:
+        xml = xmls[n]
+        root = scan_xml(xml)
+        reg = Registry(xml)
+        els = _find_hf(root, kind)
+        if not els:
+            continue
+        for el in els:
+            replace_cell_text(el, text, reg)
+        splices = build_splices(xml, reg)
+        for el in els:
+            if apply is not None:
+                open_tag = xml[el.start:el.open_end]
+                new_open = (re.sub(r'applyPageType="[^"]*"',
+                                   'applyPageType="%s"' % apply, open_tag)
+                            if 'applyPageType="' in open_tag
+                            else open_tag[:-1] + ' applyPageType="%s">' % apply)
+                if new_open != open_tag:
+                    splices.append((el.start, el.open_end, new_open))
+            if align:
+                inner_p = next(iter(descendants(el, "p")), None)
+                if inner_p is not None:
+                    m = re.search(r'paraPrIDRef="\d+"',
+                                  xml[inner_p.start:inner_p.open_end])
+                    if m:
+                        splices.append((inner_p.start + m.start(),
+                                        inner_p.start + m.end(),
+                                        'paraPrIDRef="%s"' % ppr))
+        changed[n] = apply_splices(xml, splices)
+        updated += len(els)
+    if updated:
+        _write_doc(buf, dst, changed)
+        return {"action": "updated", "instances": updated, "kind": kind,
+                "applyPageType": apply or "preserved",
+                "align": (note if align else "preserved"), "text": text}
+    # 없으면 첫 섹션 secPr 문단 뒤에 삽입
+    n = names[0]
+    xml = xmls[n]
+    _, paras = _body_paragraphs(scan_xml(xml))
+    if not paras:
+        raise ValueError("첫 섹션에 본문 문단(<hp:p>)이 없어 삽입 위치를 찾지 못함")
+    at = paras[0].end
+    new_xml = (xml[:at]
+               + _hf_wrapper(xml, kind, apply or "BOTH", ppr, _hf_text_run(text))
+               + xml[at:])
+    _write_doc(buf, dst, {n: new_xml})
+    return {"action": "inserted", "section": n, "kind": kind,
+            "applyPageType": apply or "BOTH", "align": note, "text": text}
+
+
+def set_pagenum_hwpx(src, dst, where="footer", align="CENTER"):
+    """자동 쪽번호 삽입. 같은 종류 머리말/꼬리말이 있으면 그 안에 번호를 추가,
+    없으면 쪽번호 전용 머리말/꼬리말을 새로 만든다(중복 꼬리말 방지)."""
+    kind = "header" if str(where).lower() == "header" else "footer"
+    buf, names, xmls, header_xml = _load_doc(src)
+    ppr, note = _resolve_align(header_xml, align)
+    run = _pagenum_run()
+    # 1) 기존 머리말/꼬리말(여러 개여도 전부) 첫 문단에 번호 run 추가
+    changed = {}
+    added = 0
+    for n in names:
+        xml = xmls[n]
+        els = _find_hf(scan_xml(xml), kind)
+        if not els:
+            continue
+        splices = []
+        for el in els:
+            first_p = next(iter(descendants(el, "p")), None)
+            if first_p is None:
+                continue
+            # 번호 run 삽입 + 이 문단의 stale linesegarray 제거(한컴 손상 경고 방지)
+            splices.append((first_p.content_end, first_p.content_end, run))
+            for lsa in descendants(first_p, "linesegarray"):
+                if not ancestor_within(lsa, ("p",), first_p):
+                    splices.append((lsa.start, lsa.end, ""))
+            added += 1
+        if splices:
+            changed[n] = apply_splices(xml, splices)
+    if added:
+        _write_doc(buf, dst, changed)
+        return {"action": "added-to-existing", "instances": added,
+                "where": kind, "align": "기존 %s 정렬 따름" % kind}
+    # 2) 쪽번호 전용 머리말/꼬리말 삽입
+    n = names[0]
+    xml = xmls[n]
+    _, paras = _body_paragraphs(scan_xml(xml))
+    if not paras:
+        raise ValueError("첫 섹션에 본문 문단(<hp:p>)이 없어 삽입 위치를 찾지 못함")
+    at = paras[0].end
+    new_xml = xml[:at] + _hf_wrapper(xml, kind, "BOTH", ppr, run) + xml[at:]
+    _write_doc(buf, dst, {n: new_xml})
+    return {"action": "inserted", "section": n, "where": kind, "align": note}
+
+
+def remove_header_footer_hwpx(src, dst, kind):
+    """머리말/꼬리말 제거. 컨트롤이 해당 문단의 유일한 run이면 문단째,
+    아니면 컨트롤을 품은 <hp:run>만 삭제(secPr 등 다른 내용 보존)."""
+    buf, names, xmls, _ = _load_doc(src)
+    changed = {}
+    total = 0
+    for n in names:
+        xml = xmls[n]
+        if "<hp:%s" % kind not in xml:
+            continue
+        cuts = []
+        for el in _find_hf(scan_xml(xml), kind):
+            run = el.parent.parent if el.parent and el.parent.parent else None
+            if run is None or run.name != "run":
+                continue
+            wp = run.parent
+            if (wp is not None and wp.name == "p"
+                    and len(direct_children(wp, "run")) == 1):
+                cuts.append((wp.start, wp.end))      # 머리말 전용 문단 통째 제거
+            else:
+                cuts.append((run.start, run.end))    # run만 제거 (다른 내용 보존)
+        if not cuts:
+            continue
+        for a, b in sorted(cuts, reverse=True):
+            xml = xml[:a] + xml[b:]
+            total += 1
+        changed[n] = xml
+    _write_doc(buf, dst, changed)
+    return {"action": "removed", "kind": kind, "removed": total,
+            "sections": list(changed)}
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -1666,6 +1953,32 @@ def main():
     p_fb.add_argument("input")
     p_fb.add_argument("output", nargs="?",
                       help="출력 경로 (생략 시 입력 파일 덮어쓰기)")
+
+    for _cmd, _h in (("set-header", "머리말 삽입/갱신"),
+                     ("set-footer", "꼬리말 삽입/갱신")):
+        _p = sub.add_parser(_cmd, help=_h)
+        _p.add_argument("input")
+        _p.add_argument("output")
+        _p.add_argument("--text", required=True, help="머리말/꼬리말 텍스트")
+        _p.add_argument("--apply",
+                        help="적용 페이지 BOTH/EVEN/ODD "
+                             "(미지정 시 기존값 보존, 신규는 BOTH)")
+        _p.add_argument("--align",
+                        help="가로 정렬 LEFT/CENTER/RIGHT (best-effort)")
+
+    p_pn = sub.add_parser("set-pagenum", help="자동 쪽번호 삽입")
+    p_pn.add_argument("input")
+    p_pn.add_argument("output")
+    p_pn.add_argument("--where", default="footer", choices=["header", "footer"],
+                      help="쪽번호 위치 (기본 footer)")
+    p_pn.add_argument("--align", default="CENTER",
+                      help="가로 정렬 LEFT/CENTER/RIGHT (기본 CENTER)")
+
+    for _cmd, _h in (("remove-header", "머리말 제거"),
+                     ("remove-footer", "꼬리말 제거")):
+        _p = sub.add_parser(_cmd, help=_h)
+        _p.add_argument("input")
+        _p.add_argument("output")
 
     args = parser.parse_args()
 
@@ -1771,6 +2084,28 @@ def main():
                     "output": args.output or args.input,
                     "char_borders_removed": removed,
                     "ok": True})
+            return 0
+
+        if args.command in ("set-header", "set-footer"):
+            kind = "header" if args.command == "set-header" else "footer"
+            info = set_header_footer_hwpx(args.input, args.output, kind,
+                                          args.text, args.apply, args.align)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "set-pagenum":
+            info = set_pagenum_hwpx(args.input, args.output,
+                                    args.where, args.align)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command in ("remove-header", "remove-footer"):
+            kind = "header" if args.command == "remove-header" else "footer"
+            info = remove_header_footer_hwpx(args.input, args.output, kind)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
             return 0
     except Exception as e:  # noqa: BLE001
         print(f"오류: {e}", file=sys.stderr)

@@ -267,6 +267,65 @@ def main():
         code, rep = run("check", bfixed, "--strict")
         check("fix-borders 후 strict 통과", code == 0 and rep["ok"])
 
+        # ─ 머리말·꼬리말·쪽번호 (P3: claw-hwp hwpx-edit 포팅) ─
+        def sec0(p):
+            return zipfile.ZipFile(p).read("Contents/section0.xml").decode()
+
+        hdr = d / "hdr.hwpx"
+        code, rep = run("set-header", form, hdr, "--text", "대외주의")
+        check("set-header 삽입", code == 0 and rep["action"] == "inserted")
+        s = sec0(hdr)
+        check("머리말 1개 + 텍스트 + vertAlign TOP",
+              s.count("<hp:header") == 1 and "대외주의" in s
+              and 'vertAlign="TOP"' in s)
+
+        hdr2 = d / "hdr2.hwpx"
+        code, rep = run("set-header", hdr, hdr2, "--text", "대외비")
+        check("set-header 갱신 (중복 안 생김)",
+              code == 0 and rep["action"] == "updated")
+        s = sec0(hdr2)
+        check("머리말 여전히 1개, 텍스트 교체",
+              s.count("<hp:header") == 1 and "대외비" in s
+              and "대외주의" not in s)
+
+        ftr = d / "ftr.hwpx"
+        code, rep = run("set-footer", hdr2, ftr, "--text", "발행: 재단")
+        check("set-footer 삽입 (vertAlign BOTTOM)",
+              code == 0 and rep["action"] == "inserted"
+              and 'vertAlign="BOTTOM"' in sec0(ftr))
+
+        pn = d / "pn.hwpx"
+        code, rep = run("set-pagenum", ftr, pn, "--where", "footer")
+        check("set-pagenum 기존 꼬리말에 추가",
+              code == 0 and rep["action"] == "added-to-existing")
+        s = sec0(pn)
+        check("쪽번호 autoNum 1개 + 꼬리말 중복 없음",
+              s.count("<hp:autoNum num=") == 1 and s.count("<hp:footer") == 1)
+
+        code, rep = run("check", pn, "--strict")
+        check("머리말/꼬리말/쪽번호 후 strict 통과", code == 0 and rep["ok"])
+
+        # 원본 보존 — section0.xml만 변경
+        be = {i.filename: i.CRC for i in zipfile.ZipFile(form).infolist()}
+        pe = {i.filename: i.CRC for i in zipfile.ZipFile(pn).infolist()}
+        changed = [k for k in be if be[k] != pe.get(k)]
+        check("머리말/꼬리말/쪽번호: section0만 변경",
+              changed == ["Contents/section0.xml"]
+              and not [k for k in pe if k not in be])
+
+        rmf = d / "rmf.hwpx"
+        code, rep = run("remove-footer", pn, rmf)
+        check("remove-footer 제거", code == 0 and rep["removed"] >= 1)
+        s = sec0(rmf)
+        check("꼬리말+autoNum 제거, 머리말 보존",
+              "<hp:footer" not in s and s.count("<hp:autoNum num=") == 0
+              and "<hp:header" in s)
+
+        rmh = d / "rmh.hwpx"
+        code, rep = run("remove-header", rmf, rmh)
+        check("remove-header 제거",
+              code == 0 and "<hp:header" not in sec0(rmh))
+
         # ─ 무매칭 → 원본 바이트 동일 ─
         nf = d / "nomatch.json"
         nf.write_text('{"존재하지않는라벨":"값"}', encoding="utf-8")
