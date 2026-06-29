@@ -116,6 +116,16 @@ python3 scripts/fill_hwpx.py set-footer doc.hwpx out.hwpx --text "한국연구�
 python3 scripts/fill_hwpx.py set-pagenum doc.hwpx out.hwpx --where footer --align center
 python3 scripts/fill_hwpx.py remove-header doc.hwpx out.hwpx
 
+# 표 구조/스타일 in-place (셀 배경/테두리·열추가·행삭제·셀병합)
+python3 scripts/fill_hwpx.py set-cell doc.hwpx out.hwpx --table 0 --row 0 --col 1 --bg FFE600 --border on
+python3 scripts/fill_hwpx.py merge-cells doc.hwpx out.hwpx --table 0 --row 0 --col 0 --row2 0 --col2 2
+
+# 네이티브 수식 삽입 (문법: references/equation-syntax.md)
+python3 scripts/fill_hwpx.py add-equation doc.hwpx out.hwpx --after "기준 문구" --script "x^2+y^2=z^2"
+
+# 개인정보(PII) 비경유 양식 채우기 — 값이 stdout/로그/모델 컨텍스트를 안 거침
+python3 scripts/secure_fill.py fill form.hwpx out.hwpx --profile profile.json --shred-profile
+
 # 한컴 열림 위험 신호까지 엄격 점검
 python3 scripts/fill_hwpx.py check output.hwpx --strict
 ```
@@ -175,7 +185,8 @@ hwpx-skill/
 │   ├── verify_hwpx.py          # 품질 검증
 │   ├── validate.py             # 구조 검증
 │   ├── finalize_hwpx.py        # line cache removal, layout QA, Hancom open test
-│   ├── fill_hwpx.py            # 보존형 양식 필드 채우기
+│   ├── fill_hwpx.py            # 보존형 양식 채우기 + 머리말/꼬리말/쪽번호/표구조/수식 in-place
+│   ├── secure_fill.py          # 개인정보(PII) 비경유 양식 채우기
 │   ├── hwpx_guard_hook.py      # 배포 전 HWPX strict gate 보조 훅
 │   ├── report_placeholder_hook.py # '브라더 공기관' 예시 보고서 전달 차단 훅
 │   ├── text_extract.py         # 텍스트 추출
@@ -206,7 +217,7 @@ hwpx-skill/
 | 다단 | O |
 | 머리말/꼬리말 | O |
 | OLE 객체 | 부분 지원 |
-| 수식 | 미지원 |
+| 수식 | O (`add-equation`) |
 
 ## 주요 규칙
 

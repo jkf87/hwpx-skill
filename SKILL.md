@@ -22,7 +22,8 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── finalize_hwpx.py       # line cache removal, layout QA, Hancom open test
 │   ├── analyze_template.py    # HWPX 심층 분석
 │   ├── clone_form.py           # ★ 양식 복제 (Workflow F)
-│   ├── fill_hwpx.py            # ★★ 양식 필드 채우기 (Workflow J) — 원본 보존 최강
+│   ├── fill_hwpx.py            # ★★ 양식 필드 채우기 + 머리말/꼬리말/쪽번호/표구조/수식 in-place (Workflow J)
+│   ├── secure_fill.py          # ★ 개인정보(PII) 비경유 양식 채우기
 │   ├── verify_hwpx.py         # ★ 서브에이전트 검수 도구
 │   ├── text_extract.py        # 텍스트 추출
 │   ├── build_problem_answer_sheet.py  # 문제지 1장 + 답안지 1장 생성
@@ -510,6 +511,49 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" remove-footer doc.hwpx out.hw
   한 문서에 머리말/꼬리말 슬롯이 여러 개면 **전부** 같은 텍스트로 갱신한다(정부 양식은
   머리말 슬롯을 2개 두기도 해서, 첫 개만 채우면 일부 페이지에 안 보이는 사고가 난다).
 
+### 표 구조/스타일: `set-cell` / `add-col` / `del-row` / `merge-cells`
+
+기존 표의 '모양'을 바꾼다(claw-hwp hwpx-edit.js 포팅, 순수 stdlib·원본 보존).
+좌표 모델은 `analyze`/`fill --cells`와 동일(--table=섹션 내 문서순서, --row/--col=cellAddr).
+
+```bash
+# 셀 배경색/테두리 — 배경은 borderFill 복제 후 셀 borderFillIDRef를 repoint
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-cell doc.hwpx out.hwpx --table 0 --row 0 --col 1 --bg FFE600 --border on
+# 열 추가 (끝 또는 --at 위치) — 새 열 값은 --cells ["행0","행1",...] JSON 파일
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" add-col doc.hwpx out.hwpx --table 0 --cells newcol.json
+# 행 삭제
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" del-row doc.hwpx out.hwpx --table 0 --row 2
+# 사각 범위 셀 병합 (앵커 ~ 끝)
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" merge-cells doc.hwpx out.hwpx --table 0 --row 0 --col 0 --row2 0 --col2 2
+```
+
+- **rowSpan/colSpan이 이미 있는 표는 좌표 재계산 안전을 위해 거부(exit 1)** — span 없는 일반 격자에서 동작. 배경색은 header.xml의 borderFill만 추가(itemCnt 보정), 그 외 엔트리 보존.
+
+### 수식: `add-equation`
+
+본문(--after) 또는 표 셀(--table/--row/--col)에 네이티브 한컴 수식(`<hp:equation>`)을 삽입.
+자기완결 봉투라 외부 의존이 없다(claw buildEquationXml 1:1). **수식 문법은 `references/equation-syntax.md` 참조**(분수·근호·적분·행렬·그리스문자 등).
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" add-equation doc.hwpx out.hwpx --after "기준 문구" --script "x^2+y^2=z^2"
+# 셀에: --table 0 --row 1 --col 1 --script "int _0 ^1 x^2 dx = 1 over 3"  (선택 --size 1200 = 12pt)
+```
+
+### 개인정보 양식: `secure_fill.py` (PII 비경유)
+
+주민번호·계좌 등 PII가 **모델 컨텍스트/로그/stdout를 거치지 않게** 양식을 채운다.
+값은 프로필 파일에서 in-process로만 읽고, 출력엔 키 이름·개수·마스킹값만 나온다(claw secure-fill 포팅).
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/secure_fill.py" detect form.hwpx           # 채울 키 목록(값 비출력)
+python3 "${CLAUDE_SKILL_DIR}/scripts/secure_fill.py" fill form.hwpx out.hwpx --profile profile.json --shred-profile
+python3 "${CLAUDE_SKILL_DIR}/scripts/secure_fill.py" verify out.hwpx --profile profile.json   # 마스킹 보고
+python3 "${CLAUDE_SKILL_DIR}/scripts/secure_fill.py" shred profile.json          # 프로필 안전 삭제(0덮어쓰기+unlink)
+```
+
+- ⚠️ **프로필 파일을 `cat`/출력하지 말 것** — PII 누출. 기본 ephemeral, 작업 후 `--shred-profile` 또는 `shred` 권장.
+  전화/주민번호/날짜는 칸 모양에 맞춰 자동 변환(값·변환값 모두 비출력). `shred`는 cwd·홈·임시 디렉토리 밖 경로는 거부.
+
 ### 좌표 지정 폴백: `fill --cells`
 
 라벨 휴리스틱이 안 통하는 복잡한 표는 `analyze`가 보고한 좌표로 직접 채운다.
@@ -568,6 +612,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | 작성된 문서의 기존 문구를 새 문구로 교체 | **J `replace`** (run 분할 대응) → 실패 시 F |
 | 표에 데이터 행 추가 | **J `add-row`** |
 | 머리말/꼬리말/쪽번호 사후 추가·제거 | **J `set-header`/`set-footer`/`set-pagenum`/`remove-*`** |
+| 표 셀 배경/테두리·열추가·행삭제·셀병합 | **J `set-cell`/`add-col`/`del-row`/`merge-cells`** |
+| 수식 삽입(본문/셀) | **J `add-equation`** (문법: references/equation-syntax.md) |
+| 개인정보(주민번호·계좌) 양식 채우기 | **`secure_fill.py`** (PII 비경유) |
 | 라벨 매칭 실패한 복잡한 표 | **J `fill --cells`** (좌표 지정) |
 | XML 전역 일괄 치환 (메타데이터 포함) | F (clone_form.py) |
 | `{{이름}}` 같은 플레이스홀더가 박힌 전용 템플릿 | B |
@@ -960,7 +1007,7 @@ pip install pyhwp5 olefile lxml --break-system-packages
 | 다단 | ✅ |
 | 머리말/꼬리말 | ✅ |
 | OLE 객체 | ⚠️ 부분 지원 |
-| 수식 | ❌ 미지원 |
+| 수식 | ✅ `add-equation` (hp:equation, 문법 references/equation-syntax.md) |
 
 ---
 
