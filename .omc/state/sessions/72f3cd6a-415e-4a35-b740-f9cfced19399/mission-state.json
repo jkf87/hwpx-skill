@@ -1,0 +1,45 @@
+{
+  "updatedAt": "2026-06-29T06:38:26.708Z",
+  "missions": [
+    {
+      "id": "session:72f3cd6a-415e-4a35-b740-f9cfced19399:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-06-29T06:38:26.708Z",
+      "updatedAt": "2026-06-29T06:38:26.708Z",
+      "status": "running",
+      "workerCount": 1,
+      "taskCounts": {
+        "total": 1,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 1,
+        "completed": 0,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "workflow-subagent:adfde41",
+          "role": "workflow-subagent",
+          "ownership": "adfde41f4d669f35a",
+          "status": "running",
+          "currentStep": null,
+          "latestUpdate": null,
+          "completedSummary": null,
+          "updatedAt": "2026-06-29T06:38:26.708Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:adfde41f4d669f35a:2026-06-29T06:38:26.708Z",
+          "at": "2026-06-29T06:38:26.708Z",
+          "kind": "update",
+          "agent": "workflow-subagent:adfde41",
+          "detail": "started workflow-subagent:adfde41",
+          "sourceKey": "session-start:adfde41f4d669f35a"
+        }
+      ]
+    }
+  ]
+}

@@ -3179,6 +3179,152 @@ def set_para_style_hwpx(src, dst, after=None, para=None, align=None,
             "applied": {"align": align, "line_spacing": line_spacing}}
 
 
+# ─── 각주·미주·하이퍼링크·책갈피 in-place (claw-hwp hwpx-edit.js 포팅) ─
+#
+# 모두 대상 본문 문단(top-level, 표 밖; _resolve_target_para)에 컨트롤 run을
+# 주입한다. 봉투(envelope) 구조/속성은 claw가 한컴 라운드트립으로 다듬은 그대로
+# 따른다. 각주/미주의 note id·subList id 등은 claw의 안전 기본값(id="0")을 쓴다.
+# 수정 문단의 stale linesegarray(줄배치 캐시)는 항상 제거 — 한컴 '손상 문서'
+# 경고 방지(build_splices/P8과 동일 정책). header.xml·기타 엔트리는 건드리지
+# 않고(하이퍼링크만 charPr 1개 추가) 변경 섹션만 다시 쓴다(원본 바이트 보존).
+
+
+def _para_first_charpr(sec_xml, para_el):
+    """대상 문단 안에서 처음 만나는 charPrIDRef (없으면 "0")."""
+    m = re.search(r'charPrIDRef="(\d+)"',
+                  sec_xml[para_el.content_start:para_el.content_end])
+    return m.group(1) if m else "0"
+
+
+def _append_run_to_para(sec_xml, para_el, run_xml):
+    """문단 끝(컨텐츠 끝)에 run을 삽입하고 그 문단의 stale linesegarray 제거."""
+    splices = [(para_el.content_end, para_el.content_end, run_xml)]
+    _strip_para_linesegs(sec_xml, para_el, splices)
+    return apply_splices(sec_xml, splices)
+
+
+def _note_run_xml(kind, char_id, text):
+    """각주/미주 컨트롤 run (claw opInsertNote 봉투 1:1 포팅).
+
+    kind는 "footNote" 또는 "endNote". 참조 표식(¹ ²)·페이지 하단 배치는 한컴이
+    컨트롤 위치로부터 렌더하므로 우리는 컨트롤만 문단 끝에 둔다.
+    """
+    tag = "hp:%s" % kind
+    return (
+        '<hp:run charPrIDRef="%s"><hp:ctrl>'
+        '<%s id="0">'
+        '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" '
+        'vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" '
+        'textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+        '<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0">'
+        '<hp:run charPrIDRef="0"><hp:t>%s</hp:t></hp:run>'
+        '</hp:p></hp:subList></%s></hp:ctrl></hp:run>'
+        % (char_id, tag, escape_text(text), tag))
+
+
+def add_note_hwpx(src, dst, kind, text, after=None, para=None, section_idx=0):
+    """각주(footNote)/미주(endNote) 컨트롤을 대상 문단 끝에 삽입."""
+    if not text or not str(text).strip():
+        raise ValueError("--text(주석 내용)가 필요합니다")
+    if kind not in ("footNote", "endNote"):
+        raise ValueError("kind는 footNote/endNote 중 하나여야 합니다")
+    buf, names, xmls, _ = _load_doc(src)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    char_id = _para_first_charpr(sec_xml, para_el)
+    run = _note_run_xml(kind, char_id, str(text))
+    new_sec = _append_run_to_para(sec_xml, para_el, run)
+    _write_doc(buf, dst, {sec_name: new_sec})
+    return {"action": "footnote" if kind == "footNote" else "endnote",
+            "section": sec_name, "text": text}
+
+
+def _hyperlink_run_xml(char_id, begin_id, field_id, url, text):
+    """클릭 가능한 HYPERLINK 필드 run (claw opInsertHyperlink 봉투 1:1 포팅)."""
+    u = escape_text(url)
+    return (
+        '<hp:run charPrIDRef="%s"><hp:ctrl>'
+        '<hp:fieldBegin id="%d" type="HYPERLINK" name="" editable="0" '
+        'dirty="1" zorder="-1" fieldid="%d">'
+        '<hp:parameters cnt="6" name="">'
+        '<hp:integerParam name="Prop">0</hp:integerParam>'
+        '<hp:stringParam name="Command">%s;1;0;0;</hp:stringParam>'
+        '<hp:stringParam name="Path">%s</hp:stringParam>'
+        '<hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>'
+        '<hp:stringParam name="TargetType">'
+        'HWPHYPERLINK_TARGET_BOOKMARK</hp:stringParam>'
+        '<hp:stringParam name="DocOpenType">'
+        'HWPHYPERLINK_JUMP_CURRENTTAB</hp:stringParam>'
+        '</hp:parameters></hp:fieldBegin></hp:ctrl>'
+        '<hp:t>%s</hp:t>'
+        '<hp:ctrl><hp:fieldEnd beginIDRef="%d" fieldid="%d"/></hp:ctrl>'
+        '</hp:run>'
+        % (char_id, begin_id, field_id, u, u, escape_text(text),
+           begin_id, field_id))
+
+
+def add_hyperlink_hwpx(src, dst, url, text, after=None, para=None,
+                       section_idx=0):
+    """대상 문단 끝에 클릭 가능한 URL 하이퍼링크 필드를 삽입.
+
+    웹 링크 룩을 위해 대상 문단의 charPr을 파란색+밑줄로 복제해 링크 run에
+    물린다(P8 set-text-style과 동일한 _add_cloned 트릭). 필드 자체는 charPr과
+    무관하게 동작하므로 스타일은 부가 효과.
+    """
+    if not url or not str(url).strip():
+        raise ValueError("--url(링크 주소)이 필요합니다")
+    if not text or not str(text).strip():
+        raise ValueError("--text(표시 문구)가 필요합니다")
+    buf, names, xmls, header_xml = _load_doc(src)
+    if header_xml is None:
+        raise ValueError("header.xml이 없습니다")
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        header_name = next((n for n in zf.namelist()
+                            if _HEADER_XML_RE.search(n)), None)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    base_cid = _para_first_charpr(sec_xml, para_el)
+    new_cid, new_header = _add_cloned(
+        header_xml, "charProperties", "charPr", base_cid,
+        _mutate_charpr(False, False, True, "0000FF", None))
+    ids = _fresh_ids(sec_xml, 2)
+    run = _hyperlink_run_xml(new_cid, ids[0], ids[1], str(url), str(text))
+    new_sec = _append_run_to_para(sec_xml, para_el, run)
+    _write_doc(buf, dst, {header_name: new_header, sec_name: new_sec})
+    return {"action": "hyperlink", "section": sec_name, "charPrId": new_cid,
+            "url": url, "text": text}
+
+
+def add_bookmark_hwpx(src, dst, name, after=None, para=None, section_idx=0):
+    """대상 문단 첫 run 시작에 책갈피(bookmark) 마커를 삽입.
+
+    책갈피는 상호참조/'찾아가기'의 점프 대상이 되는 이름 앵커다(claw
+    opInsertBookmark 포팅). 첫 run이 없거나 self-closing이면 새 run을 앞에 둔다.
+    """
+    if not name or not str(name).strip():
+        raise ValueError("--name(책갈피 이름)이 필요합니다")
+    buf, names, xmls, _ = _load_doc(src)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    ctrl = ('<hp:ctrl><hp:bookmark name="%s"/></hp:ctrl>'
+            % escape_text(str(name)))
+    runs = [c for c in para_el.children
+            if c.name in ("run", "r") and not c.self_closing]
+    splices = []
+    if runs:
+        pos = runs[0].content_start
+        splices.append((pos, pos, ctrl))
+    else:
+        char_id = _para_first_charpr(sec_xml, para_el)
+        run = '<hp:run charPrIDRef="%s">%s</hp:run>' % (char_id, ctrl)
+        splices.append((para_el.content_start, para_el.content_start, run))
+    _strip_para_linesegs(sec_xml, para_el, splices)
+    new_sec = apply_splices(sec_xml, splices)
+    _write_doc(buf, dst, {sec_name: new_sec})
+    return {"action": "bookmark", "section": sec_name, "name": name}
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -3385,6 +3531,37 @@ def main():
     p_img.add_argument("--size-mm", type=float, nargs="+", dest="size_mm",
                        help="크기 mm: 폭만 또는 '폭 높이'. 미지정 시 원본 크기")
     p_img.add_argument("--section", type=int, default=0)
+    for _cmd, _h in (("add-footnote", "각주(footNote) 삽입"),
+                     ("add-endnote", "미주(endNote) 삽입")):
+        _p = sub.add_parser(_cmd, help=_h)
+        _p.add_argument("input")
+        _p.add_argument("output")
+        _p.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+        _p.add_argument("--para",
+                        help="문단 인덱스(0-base, last/-1=마지막). "
+                             "--after/--para 미지정 시 마지막 문단")
+        _p.add_argument("--text", required=True, help="주석 내용")
+        _p.add_argument("--section", type=int, default=0)
+
+    p_hl = sub.add_parser("add-hyperlink",
+                          help="클릭 가능한 URL 하이퍼링크 삽입")
+    p_hl.add_argument("input")
+    p_hl.add_argument("output")
+    p_hl.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_hl.add_argument("--para",
+                      help="문단 인덱스(0-base, last/-1=마지막)")
+    p_hl.add_argument("--url", required=True, help="링크 주소")
+    p_hl.add_argument("--text", required=True, help="표시 문구")
+    p_hl.add_argument("--section", type=int, default=0)
+
+    p_bm = sub.add_parser("add-bookmark", help="책갈피(bookmark) 마커 삽입")
+    p_bm.add_argument("input")
+    p_bm.add_argument("output")
+    p_bm.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_bm.add_argument("--para",
+                      help="문단 인덱스(0-base, last/-1=마지막)")
+    p_bm.add_argument("--name", required=True, help="책갈피 이름")
+    p_bm.add_argument("--section", type=int, default=0)
 
     args = parser.parse_args()
 
@@ -3601,6 +3778,12 @@ def main():
                 args.input, args.output, image=args.image, anchor=args.anchor,
                 size_mm=args.size_mm, dx_mm=args.dx_mm, dy_mm=args.dy_mm,
                 occurrence=args.occurrence)
+        if args.command in ("add-footnote", "add-endnote"):
+            kind = "footNote" if args.command == "add-footnote" else "endNote"
+            info = add_note_hwpx(
+                args.input, args.output, kind, args.text,
+                after=args.after, para=_parse_para(args.para),
+                section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
@@ -3615,6 +3798,20 @@ def main():
                 args.input, args.output, image=args.image, after=args.after,
                 para=args.para, inline=args.inline, width_mm=width_mm,
                 height_mm=height_mm, section_idx=args.section)
+        if args.command == "add-hyperlink":
+            info = add_hyperlink_hwpx(
+                args.input, args.output, args.url, args.text,
+                after=args.after, para=_parse_para(args.para),
+                section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "add-bookmark":
+            info = add_bookmark_hwpx(
+                args.input, args.output, args.name,
+                after=args.after, para=_parse_para(args.para),
+                section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
