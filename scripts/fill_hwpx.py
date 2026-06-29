@@ -1105,6 +1105,80 @@ def patch_zip_entries(original, replacements):
     return b"".join(segments)
 
 
+def add_zip_entries(original, additions):
+    """기존 엔트리는 바이트 그대로 두고 새 엔트리만 끝에 추가.
+
+    patch_zip_entries가 '존재하는 엔트리만 교체'라면, 이쪽은 '새 엔트리만
+    추가'다 (차트 파트 Chart/chartN.xml 등). 기존 로컬 영역과 Central
+    Directory 레코드를 한 바이트도 옮기지 않으므로(새 엔트리는 CD 뒤가 아니라
+    기존 로컬 영역 끝에 덧붙이고 CD를 그만큼 뒤로 민다) 원본 보존이 유지된다.
+    """
+    if not additions:
+        return original
+    entries, cd_offset, eocd_offset = parse_central_directory(original)
+    existing = {e["name"] for e in entries}
+    for name in additions:
+        if name in existing:
+            raise ValueError(f"이미 존재하는 엔트리: {name}")
+
+    out = bytearray()
+    out += original[:cd_offset]  # 기존 로컬 영역 그대로
+    new_cd = []
+    for name, data in additions.items():
+        name_b = name.encode("utf-8")
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        c = zlib.compressobj(9, zlib.DEFLATED, -15)  # raw deflate
+        comp = c.compress(data) + c.flush()
+        local_off = len(out)
+        lh = bytearray(30)
+        lh[0:4] = LOCAL_SIG
+        struct.pack_into("<H", lh, 4, 20)     # version needed
+        struct.pack_into("<H", lh, 6, 0)      # flags
+        struct.pack_into("<H", lh, 8, 8)      # method: deflate
+        struct.pack_into("<H", lh, 10, 0)     # mod time
+        struct.pack_into("<H", lh, 12, 0x21)  # mod date 1980-01-01
+        struct.pack_into("<I", lh, 14, crc)
+        struct.pack_into("<I", lh, 18, len(comp))
+        struct.pack_into("<I", lh, 22, len(data))
+        struct.pack_into("<H", lh, 26, len(name_b))
+        struct.pack_into("<H", lh, 28, 0)     # extra len
+        out += bytes(lh) + name_b + comp
+        cd = bytearray(46)
+        cd[0:4] = CD_SIG
+        struct.pack_into("<H", cd, 4, 20)     # version made by
+        struct.pack_into("<H", cd, 6, 20)     # version needed
+        struct.pack_into("<H", cd, 8, 0)      # flags
+        struct.pack_into("<H", cd, 10, 8)     # method
+        struct.pack_into("<H", cd, 12, 0)     # time
+        struct.pack_into("<H", cd, 14, 0x21)  # date
+        struct.pack_into("<I", cd, 16, crc)
+        struct.pack_into("<I", cd, 20, len(comp))
+        struct.pack_into("<I", cd, 24, len(data))
+        struct.pack_into("<H", cd, 28, len(name_b))
+        struct.pack_into("<H", cd, 30, 0)     # extra len
+        struct.pack_into("<H", cd, 32, 0)     # comment len
+        struct.pack_into("<H", cd, 34, 0)     # disk number
+        struct.pack_into("<H", cd, 36, 0)     # internal attrs
+        struct.pack_into("<I", cd, 38, 0)     # external attrs
+        struct.pack_into("<I", cd, 42, local_off)
+        new_cd.append(bytes(cd) + name_b)
+
+    new_cd_offset = len(out)
+    out += original[cd_offset:eocd_offset]  # 기존 CD 레코드 (오프셋 불변)
+    for rec in new_cd:
+        out += rec
+    new_cd_size = len(out) - new_cd_offset
+
+    eocd = bytearray(original[eocd_offset:])
+    total = struct.unpack_from("<H", eocd, 10)[0] + len(additions)
+    struct.pack_into("<H", eocd, 8, total)    # 이 디스크의 엔트리 수
+    struct.pack_into("<H", eocd, 10, total)   # 전체 엔트리 수
+    struct.pack_into("<I", eocd, 12, new_cd_size)
+    struct.pack_into("<I", eocd, 16, new_cd_offset)
+    out += bytes(eocd)
+    return bytes(out)
+
+
 # ─── 섹션 파일 탐색 ────────────────────────────────────────────────
 
 _SECTION_RE = re.compile(r"[Ss]ection\d+\.xml$")
@@ -2047,6 +2121,510 @@ def add_equation_hwpx(src, dst, script, after=None, table=None, row=None,
     return name, where
 
 
+# ─── 직인/서명·이미지 삽입 (claw-hwp place_seal/opInsertImage 포팅) ──────
+#
+# 사용자 제공 PNG/JPG를 BinData/에 추가하고 content.hpf 매니페스트에 등록한 뒤,
+# section XML에 <hp:pic> 봉투를 삽입한다. 두 가지 배치:
+#   place-seal  — 기준 문구(발신명의·"서명 또는 인") 옆에 **떠있는(floating)** 그림.
+#                 treatAsChar="0" flowWithText="0"라 셀/표/페이지를 키우지 않고
+#                 글자 위에 겹쳐 찍힌다(claw opPlaceSeal의 핵심 속성).
+#   insert-image — 일반 이미지. 기본은 새 문단(블록, 가운데)으로, --inline이면
+#                  기준 문단 끝에 글자처럼(treatAsChar="1") 흐르게 삽입.
+# 원본보존: 변경한 section XML + content.hpf만 다시 쓰고 BinData 이미지는 새
+#   엔트리로 STORED 추가(실제 한컴 저장본도 BinData를 STORED로 보관). 나머지 보존.
+# binaryItemIDRef = content.hpf <opf:item> id(예: image1) — 실제 한컴 저장본과
+#   동일하게 header.xml binDataList 없이 매니페스트 id로 직접 참조한다.
+
+_IMG_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "bmp": "image/bmp", "gif": "image/gif",
+}
+HWPUNIT_PER_MM = 283.46    # 1mm ≈ 283.46 HWPUNIT (claw H)
+_PT2MM = 25.4 / 72.0
+_PX_TO_HWPUNIT = 75        # 96dpi 1px = 1/96in = 75 HWPUNIT(1/7200in)
+SEAL_DEFAULT_MM = 20.0     # 직인 기본 크기(세로 기준; 가로는 가로세로비 유지)
+
+
+def _find_hpf_name(buf):
+    """content.hpf(또는 .hpf) 매니페스트 엔트리 이름."""
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        for n in zf.namelist():
+            if n.endswith("content.hpf"):
+                return n
+        for n in zf.namelist():
+            if n.endswith(".hpf"):
+                return n
+    return None
+
+
+def _next_bindata_name(buf, ext):
+    """기존 BinData 파일명/매니페스트 id와 충돌하지 않는 (item_id, entry)."""
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        names = zf.namelist()
+        bins = set(n for n in names if n.startswith("BinData/"))
+        used_ids = set()
+        hpf = next((n for n in names if n.endswith(".hpf")), None)
+        if hpf:
+            h = zf.read(hpf).decode("utf-8")
+            used_ids = set(re.findall(r'<opf:item [^>]*\bid="([^"]+)"', h))
+    n = 1
+    while ("BinData/image%d.%s" % (n, ext) in bins
+           or "BinData/img%d.%s" % (n, ext) in bins
+           or ("image%d" % n) in used_ids):
+        n += 1
+    return "image%d" % n, "BinData/image%d.%s" % (n, ext)
+
+
+def add_and_patch_zip(original, replacements=None, additions=None):
+    """기존 엔트리(replacements)는 patch_zip_entries처럼 제자리 교체하고,
+    새 엔트리(additions, STORED)는 CD 앞에 추가한다. 나머지는 바이트 보존.
+
+    replacements/additions: {name: bytes}. additions의 이름은 기존에 없어야 한다.
+    엔트리 순서/압축 방식/mimetype 첫 엔트리 규약이 그대로 유지된다.
+    """
+    replacements = dict(replacements or {})
+    additions = dict(additions or {})
+    entries, cd_offset, eocd_offset = parse_central_directory(original)
+    names = {e["name"] for e in entries}
+    for name in replacements:
+        if name not in names:
+            raise ValueError("ZIP에 없는 엔트리: %s" % name)
+    for name in additions:
+        if name in names:
+            raise ValueError("이미 존재하는 엔트리(추가 불가): %s" % name)
+
+    by_local = sorted(entries, key=lambda e: e["local_offset"])
+    segments = []
+    new_local_offset = {}
+    new_meta = {}
+    offset = 0
+
+    for i, e in enumerate(by_local):
+        seg_end = (by_local[i + 1]["local_offset"]
+                   if i + 1 < len(by_local) else cd_offset)
+        new_local_offset[e["name"]] = offset
+        new_data = replacements.get(e["name"])
+        if new_data is None:
+            seg = original[e["local_offset"]:seg_end]
+            segments.append(seg)
+            offset += len(seg)
+            continue
+        lo = e["local_offset"]
+        if original[lo:lo + 4] != LOCAL_SIG:
+            raise ValueError("ZIP 로컬 헤더 시그니처 불일치")
+        name_len = struct.unpack_from("<H", original, lo + 26)[0]
+        extra_len = struct.unpack_from("<H", original, lo + 28)[0]
+        header = bytearray(original[lo:lo + 30 + name_len + extra_len])
+        if e["method"] == 0:
+            comp_data = new_data
+        else:
+            c = zlib.compressobj(9, zlib.DEFLATED, -15)
+            comp_data = c.compress(new_data) + c.flush()
+        crc = zlib.crc32(new_data) & 0xFFFFFFFF
+        flags = e["flags"] & ~0x0008
+        struct.pack_into("<H", header, 6, flags)
+        struct.pack_into("<I", header, 14, crc)
+        struct.pack_into("<I", header, 18, len(comp_data))
+        struct.pack_into("<I", header, 22, len(new_data))
+        segments.append(bytes(header))
+        segments.append(comp_data)
+        offset += len(header) + len(comp_data)
+        new_meta[e["name"]] = (flags, crc, len(comp_data), len(new_data))
+
+    # 새 엔트리(STORED) — 로컬 헤더 + 이름 + 데이터
+    added = []  # (name_bytes, local_offset, crc, size)
+    dos_time, dos_date = 0, 0x21  # 1980-01-01 00:00 (유효 최소값)
+    for name, data in additions.items():
+        name_b = name.encode("utf-8")
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        local_off = offset
+        hdr = bytearray(30)
+        hdr[0:4] = LOCAL_SIG
+        struct.pack_into("<H", hdr, 4, 20)             # version needed
+        struct.pack_into("<H", hdr, 6, 0)              # flags
+        struct.pack_into("<H", hdr, 8, 0)              # method STORED
+        struct.pack_into("<H", hdr, 10, dos_time)
+        struct.pack_into("<H", hdr, 12, dos_date)
+        struct.pack_into("<I", hdr, 14, crc)
+        struct.pack_into("<I", hdr, 18, len(data))     # comp size
+        struct.pack_into("<I", hdr, 22, len(data))     # uncomp size
+        struct.pack_into("<H", hdr, 26, len(name_b))
+        struct.pack_into("<H", hdr, 28, 0)             # extra len
+        segments.append(bytes(hdr))
+        segments.append(name_b)
+        segments.append(data)
+        offset += 30 + len(name_b) + len(data)
+        added.append((name_b, local_off, crc, len(data)))
+
+    # Central Directory — 기존 순서 유지(오프셋/메타 패치) + 새 엔트리 추가
+    new_cd_offset = offset
+    for e in entries:
+        cd = bytearray(original[e["cd_start"]:e["cd_end"]])
+        struct.pack_into("<I", cd, 42, new_local_offset[e["name"]])
+        meta = new_meta.get(e["name"])
+        if meta:
+            flags, crc, comp_size, uncomp_size = meta
+            struct.pack_into("<H", cd, 8, flags)
+            struct.pack_into("<I", cd, 16, crc)
+            struct.pack_into("<I", cd, 20, comp_size)
+            struct.pack_into("<I", cd, 24, uncomp_size)
+        segments.append(bytes(cd))
+        offset += len(cd)
+    for name_b, local_off, crc, size in added:
+        cd = bytearray(46)
+        cd[0:4] = CD_SIG
+        struct.pack_into("<H", cd, 4, 20)              # version made by
+        struct.pack_into("<H", cd, 6, 20)              # version needed
+        struct.pack_into("<H", cd, 8, 0)              # flags
+        struct.pack_into("<H", cd, 10, 0)             # method STORED
+        struct.pack_into("<H", cd, 12, dos_time)
+        struct.pack_into("<H", cd, 14, dos_date)
+        struct.pack_into("<I", cd, 16, crc)
+        struct.pack_into("<I", cd, 20, size)
+        struct.pack_into("<I", cd, 24, size)
+        struct.pack_into("<H", cd, 28, len(name_b))   # name len
+        struct.pack_into("<I", cd, 42, local_off)
+        segments.append(bytes(cd) + name_b)
+        offset += 46 + len(name_b)
+
+    new_cd_size = offset - new_cd_offset
+    total = len(entries) + len(added)
+    eocd = bytearray(original[eocd_offset:])
+    struct.pack_into("<H", eocd, 8, total)             # entries this disk
+    struct.pack_into("<H", eocd, 10, total)            # total entries
+    struct.pack_into("<I", eocd, 12, new_cd_size)
+    struct.pack_into("<I", eocd, 16, new_cd_offset)
+    segments.append(bytes(eocd))
+    return b"".join(segments)
+
+
+# ─── 이미지 픽셀 크기/가로세로비 (stdlib 헤더 파싱; claw imageAspectWH 포팅) ─
+
+def _png_size(data):
+    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n" \
+            and data[12:16] == b"IHDR":
+        w = struct.unpack_from(">I", data, 16)[0]
+        h = struct.unpack_from(">I", data, 20)[0]
+        return (w, h) if w and h else None
+    return None
+
+
+def _jpeg_size(data):
+    if len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:
+        return None
+    i, n = 2, len(data)
+    while i + 9 < n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            h = struct.unpack_from(">H", data, i + 5)[0]
+            w = struct.unpack_from(">H", data, i + 7)[0]
+            return (w, h) if w and h else None
+        if i + 4 > n:
+            break
+        i += 2 + struct.unpack_from(">H", data, i + 2)[0]
+    return None
+
+
+def _bmp_size(data):
+    if len(data) >= 26 and data[:2] == b"BM":
+        w = abs(struct.unpack_from("<i", data, 18)[0])
+        h = abs(struct.unpack_from("<i", data, 22)[0])
+        return (w, h) if w and h else None
+    return None
+
+
+def _gif_size(data):
+    if len(data) >= 10 and data[:6] in (b"GIF87a", b"GIF89a"):
+        w = struct.unpack_from("<H", data, 6)[0]
+        h = struct.unpack_from("<H", data, 8)[0]
+        return (w, h) if w and h else None
+    return None
+
+
+def _image_pixel_size(data):
+    for fn in (_png_size, _jpeg_size, _bmp_size, _gif_size):
+        r = fn(data)
+        if r:
+            return r
+    return None
+
+
+def _image_aspect(data, fallback=1.0):
+    sz = _image_pixel_size(data)
+    if sz and sz[1]:
+        return sz[0] / sz[1]
+    return fallback
+
+
+# ─── 폰트 메트릭(앵커 오프셋 계산; claw estTextWidthMm/charPrFontPt 포팅) ──
+
+def _est_text_width_mm(s, pt):
+    """대략적 텍스트 폭(mm). 한글/CJK는 전각(em), ASCII는 반각(em/2)."""
+    em = pt * _PT2MM
+    w = 0.0
+    for ch in s:
+        c = ord(ch)
+        wide = (0x1100 <= c <= 0x11FF or 0x3000 <= c <= 0x303F
+                or 0x3130 <= c <= 0x318F or 0x4E00 <= c <= 0x9FFF
+                or 0xAC00 <= c <= 0xD7A3 or 0xFF00 <= c <= 0xFFEF)
+        w += em if wide else em * 0.5
+    return w
+
+
+def _charpr_font_pt(header_xml, char_id):
+    """charPr id의 글자 크기(pt). height(1/100pt) → pt. 기본 10pt."""
+    if not header_xml or char_id is None:
+        return 10.0
+    cid = re.escape(str(char_id))
+    m = re.search(r'<hh:charPr\b[^>]*\bid="%s"[^>]*?\bheight="(\d+)"' % cid,
+                  header_xml)
+    if not m:
+        m = re.search(r'<hh:charPr\b[^>]*\bheight="(\d+)"[^>]*?\bid="%s"' % cid,
+                      header_xml)
+    if m:
+        return max(6.0, int(m.group(1)) / 100.0)
+    return 10.0
+
+
+# ─── <hp:pic> 봉투 (hwpx_helpers.make_image_para / claw buildPic와 동형) ──
+
+def _pic_element(xml, item_id, width, height, floating=False,
+                 dx_hwp=0, dy_hwp=0, rel="PARA", nat_w=None, nat_h=None):
+    """단일 <hp:pic> 요소 문자열. floating이면 떠있는 직인(겹침) 배치.
+
+    width/height: 표시 크기(HWPUNIT). nat_w/nat_h: 원본(orgSz/imgClip)용 자연 크기
+    (없으면 표시 크기 사용). id/instid는 섹션 내 미사용 최소 정수로 충돌 회피.
+    """
+    pic_id, inst_id = _fresh_ids(xml, 2)
+    nw = nat_w if nat_w else width
+    nh = nat_h if nat_h else height
+    cx, cy = width // 2, height // 2
+    if floating:
+        wrap = "IN_FRONT_OF_TEXT"
+        pos = (
+            'treatAsChar="0" affectLSpacing="0" flowWithText="0" '
+            'allowOverlap="1" holdAnchorAndSO="0" vertRelTo="%s" horzRelTo="%s" '
+            'vertAlign="TOP" horzAlign="LEFT" vertOffset="%d" horzOffset="%d"'
+            % (rel, rel, dy_hwp, dx_hwp))
+    else:
+        wrap = "TOP_AND_BOTTOM"
+        pos = (
+            'treatAsChar="1" affectLSpacing="0" flowWithText="1" '
+            'allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" '
+            'horzRelTo="COLUMN" vertAlign="TOP" horzAlign="CENTER" '
+            'vertOffset="0" horzOffset="0"')
+    return (
+        '<hp:pic id="%d" zOrder="0" numberingType="PICTURE" '
+        'textWrap="%s" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" '
+        'href="" groupLevel="0" instid="%d" reverse="0">'
+        '<hp:offset x="0" y="0"/>'
+        '<hp:orgSz width="%d" height="%d"/>'
+        '<hp:curSz width="%d" height="%d"/>'
+        '<hp:flip horizontal="0" vertical="0"/>'
+        '<hp:rotationInfo angle="0" centerX="%d" centerY="%d" rotateimage="0"/>'
+        '<hp:renderingInfo>'
+        '<hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '<hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '<hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+        '</hp:renderingInfo>'
+        '<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="%d" y="0"/>'
+        '<hc:pt2 x="%d" y="%d"/><hc:pt3 x="0" y="%d"/></hp:imgRect>'
+        '<hp:imgClip left="0" right="%d" top="0" bottom="%d"/>'
+        '<hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:imgDim dimwidth="%d" dimheight="%d"/>'
+        '<hc:img binaryItemIDRef="%s" bright="0" contrast="0" '
+        'effect="REAL_PIC" alpha="0"/><hp:effects/>'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" '
+        'heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos %s/>'
+        '<hp:outMargin left="0" right="0" top="0" bottom="0"/>'
+        '<hp:shapeComment>inserted image</hp:shapeComment>'
+        '</hp:pic>'
+        % (pic_id, wrap, inst_id, nw, nh, width, height, cx, cy,
+           width, width, height, height, nw, nh, nw, nh, item_id,
+           width, height, pos))
+
+
+def _embed_image(buf, image_path):
+    """이미지 바이트를 읽고 (item_id, entry, ext, data, aspect, nat_w, nat_h)."""
+    ext = image_path.rsplit(".", 1)[-1].lower() if "." in image_path else ""
+    if ext not in _IMG_MIME:
+        raise ValueError(
+            "지원하지 않는 이미지 형식: .%s (png/jpg/jpeg/bmp/gif)" % ext)
+    with open(image_path, "rb") as f:
+        data = f.read()
+    if not data:
+        raise ValueError("이미지 파일이 비어 있습니다: %s" % image_path)
+    item_id, entry = _next_bindata_name(buf, ext)
+    aspect = _image_aspect(data)
+    px = _image_pixel_size(data)
+    nat_w = px[0] * _PX_TO_HWPUNIT if px else None
+    nat_h = px[1] * _PX_TO_HWPUNIT if px else None
+    return item_id, entry, ext, data, aspect, nat_w, nat_h
+
+
+def _register_manifest(buf, hpf_name, item_id, entry, ext):
+    """content.hpf에 <opf:item> 추가한 새 XML(bytes). 이미 있으면 그대로."""
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        hpf_xml = zf.read(hpf_name).decode("utf-8")
+    if ('href="%s"' % entry) in hpf_xml:
+        return hpf_xml.encode("utf-8")
+    item = ('<opf:item id="%s" href="%s" media-type="%s" isEmbeded="1"/>'
+            % (item_id, entry, _IMG_MIME[ext]))
+    if "</opf:manifest>" not in hpf_xml:
+        raise ValueError("content.hpf에 <opf:manifest>가 없습니다")
+    hpf_xml = hpf_xml.replace("</opf:manifest>", item + "</opf:manifest>", 1)
+    return hpf_xml.encode("utf-8")
+
+
+def place_seal_hwpx(src, dst, image, anchor, size_mm=SEAL_DEFAULT_MM,
+                    dx_mm=0.0, dy_mm=0.0, occurrence=0):
+    """기준 문구(anchor) 옆에 떠있는 직인/서명 그림을 삽입.
+
+    문구가 든 문단(본문·표 셀 무관)의 끝에 floating <hp:pic> run을 붙인다.
+    오프셋은 그 문단 기준(vertRelTo/horzRelTo="PARA") — 앵커 앞 텍스트 폭만큼
+    오른쪽으로 이동시켜 글자 위가 아닌 옆에 찍히게 한다(claw opPlaceSeal 'right').
+    dx_mm/dy_mm은 계산값에 더하는 미세조정.
+    """
+    if not anchor:
+        raise ValueError("--anchor(기준 문구)가 필요합니다")
+    if size_mm <= 0:
+        raise ValueError("--size-mm은 양수여야 합니다")
+    buf, names, xmls, header_xml = _load_doc(src)
+    hpf_name = _find_hpf_name(buf)
+    if not hpf_name:
+        raise ValueError("content.hpf를 찾을 수 없습니다")
+    item_id, entry, ext, data, aspect, nat_w, nat_h = _embed_image(buf, image)
+
+    # 문구가 든 문단을 문서 순서로 수집(본문/셀 모두)
+    target_section = None
+    cands = []
+    for n in names:
+        xml = xmls[n]
+        root = scan_xml(xml)
+        reg = Registry(xml)
+        for p_el in descendants(root, "p"):
+            full = "".join(tn.text for tn in own_tnodes(p_el, reg))
+            if anchor in full:
+                cands.append((n, p_el, full))
+        if cands:
+            target_section = n
+            break
+    if not cands:
+        raise ValueError("기준 문구를 찾을 수 없음: %r" % anchor)
+    if occurrence < 0 or occurrence >= len(cands):
+        raise ValueError(
+            "occurrence %d 없음 (이 섹션에서 %d개 발견 — 0..%d)"
+            % (occurrence, len(cands), len(cands) - 1))
+    name, p_el, full = cands[occurrence]
+    xml = xmls[name]
+
+    h_hwp = max(1, int(round(size_mm * HWPUNIT_PER_MM)))
+    w_hwp = max(1, int(round(size_mm * aspect * HWPUNIT_PER_MM)))
+    m = re.search(r'charPrIDRef="(\d+)"', xml[p_el.start:p_el.end])
+    char_id = m.group(1) if m else "0"
+    pt = _charpr_font_pt(header_xml, char_id)
+    idx = full.index(anchor)
+    start_x = _est_text_width_mm(full[:idx], pt)
+    anchor_w = _est_text_width_mm(anchor, pt)
+    dx = start_x + anchor_w + 2.0 + dx_mm   # 앵커 오른쪽 + 2mm 여백
+    dy = dy_mm
+    dx_hwp = int(round(dx * HWPUNIT_PER_MM))
+    dy_hwp = int(round(dy * HWPUNIT_PER_MM))
+
+    pic = _pic_element(xml, item_id, w_hwp, h_hwp, floating=True,
+                       dx_hwp=dx_hwp, dy_hwp=dy_hwp, rel="PARA",
+                       nat_w=nat_w, nat_h=nat_h)
+    run = '<hp:run charPrIDRef="0">%s</hp:run>' % pic
+    splices = [(p_el.content_end, p_el.content_end, run)]
+    _strip_para_linesegs(xml, p_el, splices)
+    new_xml = apply_splices(xml, splices)
+
+    replacements = {name: new_xml.encode("utf-8"),
+                    hpf_name: _register_manifest(buf, hpf_name, item_id,
+                                                 entry, ext)}
+    out = add_and_patch_zip(buf, replacements, {entry: data})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return {"section": name, "anchor": anchor, "occurrence": occurrence,
+            "item_id": item_id, "entry": entry, "size_mm": size_mm,
+            "dx_mm": round(dx, 2), "dy_mm": round(dy, 2),
+            "modified_entries": sorted(replacements),
+            "added_entries": [entry]}
+
+
+def insert_image_hwpx(src, dst, image, after=None, para=None, inline=False,
+                      width_mm=None, height_mm=None, section_idx=0):
+    """일반 이미지 삽입. 기본은 기준 문단 뒤 새 문단(블록, 가운데),
+    --inline이면 기준 문단 끝에 글자처럼(treatAsChar="1") 흐르게 삽입."""
+    buf, names, xmls, header_xml = _load_doc(src)
+    hpf_name = _find_hpf_name(buf)
+    if not hpf_name:
+        raise ValueError("content.hpf를 찾을 수 없습니다")
+    item_id, entry, ext, data, aspect, nat_w, nat_h = _embed_image(buf, image)
+
+    name, xml, p_el = _resolve_target_para(names, xmls, after, para,
+                                           section_idx)
+
+    # 표시 크기 결정 (HWPUNIT)
+    if width_mm and height_mm:
+        w_hwp = int(round(width_mm * HWPUNIT_PER_MM))
+        h_hwp = int(round(height_mm * HWPUNIT_PER_MM))
+    elif width_mm:
+        w_hwp = int(round(width_mm * HWPUNIT_PER_MM))
+        h_hwp = max(1, int(round(w_hwp / aspect)))
+    elif height_mm:
+        h_hwp = int(round(height_mm * HWPUNIT_PER_MM))
+        w_hwp = max(1, int(round(h_hwp * aspect)))
+    elif nat_w and nat_h:
+        w_hwp, h_hwp = int(nat_w), int(nat_h)   # 원본 픽셀(96dpi) 크기
+    else:
+        w_hwp = int(round(40.0 * HWPUNIT_PER_MM))   # 폭 40mm 기본
+        h_hwp = max(1, int(round(w_hwp / aspect)))
+    if w_hwp <= 0 or h_hwp <= 0:
+        raise ValueError("이미지 크기는 양수여야 합니다")
+
+    if inline:
+        pic = _pic_element(xml, item_id, w_hwp, h_hwp, floating=False,
+                           nat_w=nat_w, nat_h=nat_h)
+        m = re.search(r'charPrIDRef="(\d+)"', xml[p_el.start:p_el.end])
+        char_id = m.group(1) if m else "0"
+        run = '<hp:run charPrIDRef="%s">%s</hp:run>' % (char_id, pic)
+        splices = [(p_el.content_end, p_el.content_end, run)]
+        _strip_para_linesegs(xml, p_el, splices)
+        new_xml = apply_splices(xml, splices)
+        where = "inline"
+    else:
+        pic = _pic_element(xml, item_id, w_hwp, h_hwp, floating=False,
+                           nat_w=nat_w, nat_h=nat_h)
+        # _pic_element는 _fresh_ids(xml,2)로 pic/inst id를 쓰므로, 새 문단 id는
+        # 세 번째 미사용 정수를 쓴다(같은 xml이라 충돌 없음).
+        pid = _fresh_ids(xml, 3)[2]
+        m = re.search(r'charPrIDRef="(\d+)"', xml[p_el.start:p_el.end])
+        char_id = m.group(1) if m else "0"
+        new_para = (
+            '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+            'columnBreak="0" merged="0"><hp:run charPrIDRef="%s">%s</hp:run>'
+            '</hp:p>' % (pid, char_id, pic))
+        new_xml = apply_splices(xml, [(p_el.end, p_el.end, new_para)])
+        where = "block"
+
+    replacements = {name: new_xml.encode("utf-8"),
+                    hpf_name: _register_manifest(buf, hpf_name, item_id,
+                                                 entry, ext)}
+    out = add_and_patch_zip(buf, replacements, {entry: data})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return {"section": name, "placement": where, "item_id": item_id,
+            "entry": entry, "width_mm": round(w_hwp / HWPUNIT_PER_MM, 2),
+            "height_mm": round(h_hwp / HWPUNIT_PER_MM, 2),
+            "modified_entries": sorted(replacements),
+            "added_entries": [entry]}
+
+
 # ─── 표 구조/스타일 in-place op (claw-hwp hwpx-edit.js 포팅) ──────────
 #
 # 기존 표의 '모양'을 바꾼다. claw-hwp의 set_cell_background/set_cell_border/
@@ -2675,6 +3253,769 @@ def set_para_style_hwpx(src, dst, after=None, para=None, align=None,
             "applied": {"align": align, "line_spacing": line_spacing}}
 
 
+# ─── 각주·미주·하이퍼링크·책갈피 in-place (claw-hwp hwpx-edit.js 포팅) ─
+#
+# 모두 대상 본문 문단(top-level, 표 밖; _resolve_target_para)에 컨트롤 run을
+# 주입한다. 봉투(envelope) 구조/속성은 claw가 한컴 라운드트립으로 다듬은 그대로
+# 따른다. 각주/미주의 note id·subList id 등은 claw의 안전 기본값(id="0")을 쓴다.
+# 수정 문단의 stale linesegarray(줄배치 캐시)는 항상 제거 — 한컴 '손상 문서'
+# 경고 방지(build_splices/P8과 동일 정책). header.xml·기타 엔트리는 건드리지
+# 않고(하이퍼링크만 charPr 1개 추가) 변경 섹션만 다시 쓴다(원본 바이트 보존).
+
+
+def _para_first_charpr(sec_xml, para_el):
+    """대상 문단 안에서 처음 만나는 charPrIDRef (없으면 "0")."""
+    m = re.search(r'charPrIDRef="(\d+)"',
+                  sec_xml[para_el.content_start:para_el.content_end])
+    return m.group(1) if m else "0"
+
+
+def _append_run_to_para(sec_xml, para_el, run_xml):
+    """문단 끝(컨텐츠 끝)에 run을 삽입하고 그 문단의 stale linesegarray 제거."""
+    splices = [(para_el.content_end, para_el.content_end, run_xml)]
+    _strip_para_linesegs(sec_xml, para_el, splices)
+    return apply_splices(sec_xml, splices)
+
+
+def _note_run_xml(kind, char_id, text):
+    """각주/미주 컨트롤 run (claw opInsertNote 봉투 1:1 포팅).
+
+    kind는 "footNote" 또는 "endNote". 참조 표식(¹ ²)·페이지 하단 배치는 한컴이
+    컨트롤 위치로부터 렌더하므로 우리는 컨트롤만 문단 끝에 둔다.
+    """
+    tag = "hp:%s" % kind
+    return (
+        '<hp:run charPrIDRef="%s"><hp:ctrl>'
+        '<%s id="0">'
+        '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" '
+        'vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" '
+        'textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+        '<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0">'
+        '<hp:run charPrIDRef="0"><hp:t>%s</hp:t></hp:run>'
+        '</hp:p></hp:subList></%s></hp:ctrl></hp:run>'
+        % (char_id, tag, escape_text(text), tag))
+
+
+def add_note_hwpx(src, dst, kind, text, after=None, para=None, section_idx=0):
+    """각주(footNote)/미주(endNote) 컨트롤을 대상 문단 끝에 삽입."""
+    if not text or not str(text).strip():
+        raise ValueError("--text(주석 내용)가 필요합니다")
+    if kind not in ("footNote", "endNote"):
+        raise ValueError("kind는 footNote/endNote 중 하나여야 합니다")
+    buf, names, xmls, _ = _load_doc(src)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    char_id = _para_first_charpr(sec_xml, para_el)
+    run = _note_run_xml(kind, char_id, str(text))
+    new_sec = _append_run_to_para(sec_xml, para_el, run)
+    _write_doc(buf, dst, {sec_name: new_sec})
+    return {"action": "footnote" if kind == "footNote" else "endnote",
+            "section": sec_name, "text": text}
+
+
+def _hyperlink_run_xml(char_id, begin_id, field_id, url, text):
+    """클릭 가능한 HYPERLINK 필드 run (claw opInsertHyperlink 봉투 1:1 포팅)."""
+    u = escape_text(url)
+    return (
+        '<hp:run charPrIDRef="%s"><hp:ctrl>'
+        '<hp:fieldBegin id="%d" type="HYPERLINK" name="" editable="0" '
+        'dirty="1" zorder="-1" fieldid="%d">'
+        '<hp:parameters cnt="6" name="">'
+        '<hp:integerParam name="Prop">0</hp:integerParam>'
+        '<hp:stringParam name="Command">%s;1;0;0;</hp:stringParam>'
+        '<hp:stringParam name="Path">%s</hp:stringParam>'
+        '<hp:stringParam name="Category">HWPHYPERLINK_TYPE_URL</hp:stringParam>'
+        '<hp:stringParam name="TargetType">'
+        'HWPHYPERLINK_TARGET_BOOKMARK</hp:stringParam>'
+        '<hp:stringParam name="DocOpenType">'
+        'HWPHYPERLINK_JUMP_CURRENTTAB</hp:stringParam>'
+        '</hp:parameters></hp:fieldBegin></hp:ctrl>'
+        '<hp:t>%s</hp:t>'
+        '<hp:ctrl><hp:fieldEnd beginIDRef="%d" fieldid="%d"/></hp:ctrl>'
+        '</hp:run>'
+        % (char_id, begin_id, field_id, u, u, escape_text(text),
+           begin_id, field_id))
+
+
+def add_hyperlink_hwpx(src, dst, url, text, after=None, para=None,
+                       section_idx=0):
+    """대상 문단 끝에 클릭 가능한 URL 하이퍼링크 필드를 삽입.
+
+    웹 링크 룩을 위해 대상 문단의 charPr을 파란색+밑줄로 복제해 링크 run에
+    물린다(P8 set-text-style과 동일한 _add_cloned 트릭). 필드 자체는 charPr과
+    무관하게 동작하므로 스타일은 부가 효과.
+    """
+    if not url or not str(url).strip():
+        raise ValueError("--url(링크 주소)이 필요합니다")
+    if not text or not str(text).strip():
+        raise ValueError("--text(표시 문구)가 필요합니다")
+    buf, names, xmls, header_xml = _load_doc(src)
+    if header_xml is None:
+        raise ValueError("header.xml이 없습니다")
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        header_name = next((n for n in zf.namelist()
+                            if _HEADER_XML_RE.search(n)), None)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    base_cid = _para_first_charpr(sec_xml, para_el)
+    new_cid, new_header = _add_cloned(
+        header_xml, "charProperties", "charPr", base_cid,
+        _mutate_charpr(False, False, True, "0000FF", None))
+    ids = _fresh_ids(sec_xml, 2)
+    run = _hyperlink_run_xml(new_cid, ids[0], ids[1], str(url), str(text))
+    new_sec = _append_run_to_para(sec_xml, para_el, run)
+    _write_doc(buf, dst, {header_name: new_header, sec_name: new_sec})
+    return {"action": "hyperlink", "section": sec_name, "charPrId": new_cid,
+            "url": url, "text": text}
+
+
+def add_bookmark_hwpx(src, dst, name, after=None, para=None, section_idx=0):
+    """대상 문단 첫 run 시작에 책갈피(bookmark) 마커를 삽입.
+
+    책갈피는 상호참조/'찾아가기'의 점프 대상이 되는 이름 앵커다(claw
+    opInsertBookmark 포팅). 첫 run이 없거나 self-closing이면 새 run을 앞에 둔다.
+    """
+    if not name or not str(name).strip():
+        raise ValueError("--name(책갈피 이름)이 필요합니다")
+    buf, names, xmls, _ = _load_doc(src)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    ctrl = ('<hp:ctrl><hp:bookmark name="%s"/></hp:ctrl>'
+            % escape_text(str(name)))
+    runs = [c for c in para_el.children
+            if c.name in ("run", "r") and not c.self_closing]
+    splices = []
+    if runs:
+        pos = runs[0].content_start
+        splices.append((pos, pos, ctrl))
+    else:
+        char_id = _para_first_charpr(sec_xml, para_el)
+        run = '<hp:run charPrIDRef="%s">%s</hp:run>' % (char_id, ctrl)
+        splices.append((para_el.content_start, para_el.content_start, run))
+    _strip_para_linesegs(sec_xml, para_el, splices)
+    new_sec = apply_splices(sec_xml, splices)
+    _write_doc(buf, dst, {sec_name: new_sec})
+    return {"action": "bookmark", "section": sec_name, "name": name}
+
+
+# ─── P9: 페이지 설정·다단·쪽/단 나누기 ──────────────────────────────
+#
+# claw-hwp hwpx-edit.js의 set_page_break/set_column_break/set_columns/
+# set_page_setup를 Python stdlib로 직역. 핵심 철칙: secPr(pagePr/margin)은
+# '한컴 손상 문서' 최대 민감부 → 기존 자식/속성을 보존하며 속성값만 정확히
+# 변경(구조·태그 추가/삭제 금지). check_openable이 secPr 완전성을 본다.
+
+MM_TO_HWPUNIT = 7200.0 / 25.4  # 1인치=7200 HWPUNIT → 1mm≈283.46 HWPUNIT
+
+# 편집 용지 프리셋 (mm) — 세로(portrait) 기준 (너비, 높이)
+_PAGE_SIZES_MM = {
+    "a3": (297.0, 420.0), "a4": (210.0, 297.0), "a5": (148.0, 210.0),
+    "b4": (257.0, 364.0), "b5": (176.0, 250.0), "b6": (128.0, 182.0),
+    "letter": (215.9, 279.4), "legal": (215.9, 355.6),
+}
+
+
+def _mm_to_hu(mm):
+    return int(round(float(mm) * MM_TO_HWPUNIT))
+
+
+def set_para_break_hwpx(src, dst, kind, after=None, para=None, on=True,
+                        section_idx=0):
+    """대상 본문 문단에 쪽/단 나누기(pageBreak/columnBreak) 속성 설정.
+
+    kind: "page" → pageBreak, "column" → columnBreak. on=False면 0으로 해제.
+    표 안 문단이 아닌 본문 <hp:p>만 대상(_resolve_target_para).
+    """
+    attr = {"page": "pageBreak", "column": "columnBreak"}[kind]
+    buf, names, xmls, _ = _load_doc(src)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    open_tag = sec_xml[para_el.start:para_el.open_end]
+    new_open = _set_open_attr(open_tag, attr, "1" if on else "0")
+    changed = {}
+    if new_open != open_tag:
+        new_sec = sec_xml[:para_el.start] + new_open + sec_xml[para_el.open_end:]
+        changed[sec_name] = new_sec
+    _write_doc(buf, dst, changed)
+    return {"action": "%s-break" % kind, "section": sec_name, "attr": attr,
+            "on": bool(on)}
+
+
+def _apply_colpr(xml, n, gap):
+    """섹션 XML의 모든 <hp:colPr/>에 다단(colCount/sameSz/sameGap) 적용."""
+    cnt = [0]
+
+    def repl(m):
+        tag = m.group(0)
+        if re.search(r'\bcolCount="\d+"', tag):
+            tag = re.sub(r'\bcolCount="\d+"', 'colCount="%d"' % n, tag)
+        else:
+            tag = re.sub(r'\s*/>$', ' colCount="%d"/>' % n, tag)
+        if re.search(r'\bsameSz="\d+"', tag):
+            tag = re.sub(r'\bsameSz="\d+"', 'sameSz="1"', tag)
+        else:
+            tag = re.sub(r'\s*/>$', ' sameSz="1"/>', tag)
+        if re.search(r'\bsameGap="\d+"', tag):
+            tag = re.sub(r'\bsameGap="\d+"', 'sameGap="%d"' % gap, tag)
+        else:
+            tag = re.sub(r'\s*/>$', ' sameGap="%d"/>' % gap, tag)
+        cnt[0] += 1
+        return tag
+
+    return re.sub(r'<hp:colPr\b[^>]*/>', repl, xml), cnt[0]
+
+
+def set_columns_hwpx(src, dst, count, gap_mm=None):
+    """모든 섹션의 secPr 다단(단/칼럼) 설정. count=1이면 단일 단으로 복귀."""
+    n = int(count)
+    if n < 1:
+        raise ValueError("--count는 1 이상의 정수여야 합니다")
+    if n > 1:
+        gap = _mm_to_hu(gap_mm) if gap_mm is not None else 1134  # 기본≈4mm
+    else:
+        gap = 0
+    buf, names, xmls, _ = _load_doc(src)
+    changed, total = {}, 0
+    for name in names:
+        new_xml, c = _apply_colpr(xmls[name], n, gap)
+        if c and new_xml != xmls[name]:
+            changed[name] = new_xml
+        total += c
+    if total == 0:
+        raise ValueError("set-columns: <hp:colPr>를 찾지 못했습니다 (정상 HWPX 아님)")
+    _write_doc(buf, dst, changed)
+    return {"action": "set-columns", "count": n, "gap_hwpunit": gap,
+            "colpr_total": total, "sections_changed": list(changed)}
+
+
+def _margin_repl(tag, g):
+    """<hp:margin/>의 left/right/top/bottom만 g로 변경(header/footer/gutter 보존)."""
+    for a in ("left", "right", "top", "bottom"):
+        if re.search(r'\b%s="\d+"' % a, tag):
+            tag = re.sub(r'\b%s="\d+"' % a, '%s="%d"' % (a, g), tag)
+    return tag
+
+
+def _apply_pagepr(xml, orientation, margin_mm, size, width_mm, height_mm):
+    """섹션 XML의 모든 <hp:pagePr ...>(용지 크기/방향) + <hp:margin/>(여백) 변경."""
+    cnt = [0]
+
+    def repl(m):
+        tag = m.group(0)
+        wm = re.search(r'\bwidth="(\d+)"', tag)
+        hm = re.search(r'\bheight="(\d+)"', tag)
+        w = int(wm.group(1)) if wm else 59528
+        h = int(hm.group(1)) if hm else 84186
+        if size:
+            sw, sh = _PAGE_SIZES_MM[size.lower()]
+            w, h = _mm_to_hu(sw), _mm_to_hu(sh)
+        if width_mm is not None:
+            w = _mm_to_hu(width_mm)
+        if height_mm is not None:
+            h = _mm_to_hu(height_mm)
+        if orientation:
+            land = orientation.lower() == "landscape"
+            if (land and w < h) or (not land and w > h):
+                w, h = h, w
+        tag = _set_open_attr(tag, "width", str(w))
+        tag = _set_open_attr(tag, "height", str(h))
+        cnt[0] += 1
+        return tag
+
+    new = re.sub(r'<hp:pagePr\b[^>]*?>', repl, xml)
+    if margin_mm is not None and cnt[0]:
+        g = _mm_to_hu(margin_mm)
+        new = re.sub(r'<hp:margin\b[^>]*?/>',
+                     lambda mm: _margin_repl(mm.group(0), g), new)
+    return new, cnt[0]
+
+
+def set_page_hwpx(src, dst, orientation=None, margin_mm=None, size=None,
+                  width_mm=None, height_mm=None):
+    """모든 섹션의 secPr 편집 용지(크기/방향/여백) 변경. 자식 구조는 보존.
+
+    방향은 너비-높이 대소로 결정(landscape면 너비>높이가 되도록 swap). HWPX
+    pagePr의 landscape enum 힌트는 claw 검증 동작을 따라 그대로 둔다.
+    """
+    if orientation and orientation.lower() not in ("portrait", "landscape"):
+        raise ValueError("--orientation은 portrait/landscape 중 하나")
+    if size and size.lower() not in _PAGE_SIZES_MM:
+        raise ValueError("--size는 %s 중 하나" % "/".join(sorted(_PAGE_SIZES_MM)))
+    if not (orientation or margin_mm is not None or size
+            or width_mm is not None or height_mm is not None):
+        raise ValueError("변경 항목(--orientation/--margin-mm/--size/"
+                         "--width-mm/--height-mm) 중 하나는 지정해야 합니다")
+    buf, names, xmls, _ = _load_doc(src)
+    changed, total = {}, 0
+    for name in names:
+        new_xml, c = _apply_pagepr(
+            xmls[name], orientation, margin_mm, size, width_mm, height_mm)
+        if c and new_xml != xmls[name]:
+            changed[name] = new_xml
+        total += c
+    if total == 0:
+        raise ValueError("set-page: <hp:pagePr>를 찾지 못했습니다 (정상 HWPX 아님)")
+    _write_doc(buf, dst, changed)
+    return {"action": "set-page", "pagepr_total": total,
+            "sections_changed": list(changed),
+            "applied": {"orientation": orientation, "margin_mm": margin_mm,
+                        "size": size, "width_mm": width_mm,
+                        "height_mm": height_mm}}
+
+
+# ─── 네이티브 차트 삽입 (claw-hwp opInsertChart 포팅) ───────────────
+#
+# 한컴은 <hp:chart chartIDRef="Chart/chartN.xml">가 가리키는 OOXML chartSpace
+# (c:chartSpace) 파트에서 차트를 그린다 — 한컴독스가 함께 쓰는 BinData OLE는
+# 렌더링에 필요 없다(claw 검증). 그래서 OOXML chartSpace를 {type,cat,series}로
+# 생성해 Chart/ 파트에 넣고, content.hpf 매니페스트에 등록하고, 섹션에 인라인
+# (treatAsChar=1) <hp:chart>를 새 문단으로 삽입한다.
+#
+# 견고히 지원하는 타입: 세로막대(col)/가로막대(bar)/꺾은선(line)/영역(area)/
+#   원(pie). 3D·도넛·분산형·방사형 등은 한컴 렌더 검증이 어려워 스코프 제외.
+# 색상/제목/데이터레이블 커스터마이즈는 미지원(한컴 기본 팔레트) — limitations.
+
+CHART_DEFAULT_W = 32250   # HWPUNIT (≈113.8mm)
+CHART_DEFAULT_H = 18750   # HWPUNIT (≈66.1mm)
+
+_CHART_SPECS = {
+    "col":  {"el": "barChart", "dir": "col", "grp": "clustered"},
+    "bar":  {"el": "barChart", "dir": "bar", "grp": "clustered"},
+    "line": {"el": "lineChart", "grp": "standard", "marker": True},
+    "area": {"el": "areaChart", "grp": "standard"},
+    "pie":  {"el": "pieChart", "pie": True},
+}
+
+_CHART_NS = ('xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+             'relationships" xmlns:a="http://schemas.openxmlformats.org/'
+             'drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/'
+             'drawingml/2006/chart"')
+
+
+def _chart_col_letter(i):
+    return chr(66 + i)  # 0 -> B (A열은 범주축)
+
+
+def _chart_num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "0"
+    return str(int(f)) if f == int(f) else repr(f)
+
+
+def _chart_str_cache(vals):
+    pts = "".join('<c:pt idx="%d"><c:v>%s</c:v></c:pt>'
+                  % (i, escape_text(str(v))) for i, v in enumerate(vals))
+    return '<c:ptCount val="%d"/>%s' % (len(vals), pts)
+
+
+def _chart_num_cache(vals):
+    pts = "".join('<c:pt idx="%d"><c:v>%s</c:v></c:pt>'
+                  % (i, _chart_num(v)) for i, v in enumerate(vals))
+    return ('<c:formatCode>General</c:formatCode><c:ptCount val="%d"/>%s'
+            % (len(vals), pts))
+
+
+def _chart_std_ser(idx, name, cat, values):
+    """cat+val 계열 (막대/꺾은선/영역/원). 색은 한컴 기본 팔레트(<c:spPr/>)."""
+    cl = _chart_col_letter(idx)
+    return (
+        '<c:ser><c:idx val="%d"/><c:order val="%d"/>'
+        '<c:tx><c:strRef><c:f>Sheet1!$%s$1</c:f><c:strCache>'
+        '<c:ptCount val="1"/><c:pt idx="0"><c:v>%s</c:v></c:pt>'
+        '</c:strCache></c:strRef></c:tx>'
+        '<c:spPr/><c:invertIfNegative val="0"/>'
+        '<c:cat><c:strRef><c:f>Sheet1!$A$2:$A$%d</c:f>'
+        '<c:strCache>%s</c:strCache></c:strRef></c:cat>'
+        '<c:val><c:numRef><c:f>Sheet1!$%s$2:$%s$%d</c:f>'
+        '<c:numCache>%s</c:numCache></c:numRef></c:val></c:ser>'
+        % (idx, idx, cl, escape_text(name), len(cat) + 1, _chart_str_cache(cat),
+           cl, cl, len(values) + 1, _chart_num_cache(values)))
+
+
+def _chart_cat_ax(ax_id, pos, cross):
+    return ('<c:catAx><c:axId val="%s"/><c:scaling>'
+            '<c:orientation val="minMax"/></c:scaling><c:axPos val="%s"/>'
+            '<c:crossAx val="%s"/><c:delete val="0"/>'
+            '<c:majorTickMark val="out"/><c:minorTickMark val="none"/>'
+            '<c:tickLblPos val="nextTo"/><c:crosses val="autoZero"/>'
+            '<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/>'
+            '<c:noMultiLvlLbl val="0"/></c:catAx>' % (ax_id, pos, cross))
+
+
+def _chart_val_ax(ax_id, pos, cross):
+    return ('<c:valAx><c:axId val="%s"/><c:scaling>'
+            '<c:orientation val="minMax"/></c:scaling><c:axPos val="%s"/>'
+            '<c:majorGridlines/>'
+            '<c:numFmt formatCode="General" sourceLinked="1"/>'
+            '<c:crossAx val="%s"/><c:delete val="0"/>'
+            '<c:majorTickMark val="out"/><c:minorTickMark val="none"/>'
+            '<c:tickLblPos val="nextTo"/><c:crosses val="autoZero"/>'
+            '<c:crossBetween val="between"/></c:valAx>' % (ax_id, pos, cross))
+
+
+def _build_chartspace(spec, cat, series):
+    """OOXML c:chartSpace 파트 XML 생성 (claw buildChartSpace 포팅)."""
+    ax1, ax2 = "111111111", "222222222"
+    if spec.get("pie"):
+        s0 = series[0]
+        plot = ('<c:%s><c:varyColors val="1"/>%s<c:firstSliceAng val="0"/>'
+                '</c:%s>'
+                % (spec["el"],
+                   _chart_std_ser(0, s0["name"], cat, s0["values"]),
+                   spec["el"]))
+    else:
+        sers = "".join(_chart_std_ser(i, s["name"], cat, s["values"])
+                       for i, s in enumerate(series))
+        horiz = spec.get("dir") == "bar"
+        inner = ""
+        if spec.get("dir"):
+            inner += '<c:barDir val="%s"/>' % spec["dir"]
+        if spec.get("grp"):
+            inner += '<c:grouping val="%s"/>' % spec["grp"]
+        inner += '<c:varyColors val="0"/>' + sers
+        if spec.get("marker"):
+            inner += '<c:marker val="1"/>'
+        if spec["el"].startswith("bar"):
+            inner += '<c:gapWidth val="150"/><c:overlap val="0"/>'
+        inner += '<c:axId val="%s"/><c:axId val="%s"/>' % (ax1, ax2)
+        plot = ('<c:%s>%s</c:%s>%s%s'
+                % (spec["el"], inner, spec["el"],
+                   _chart_cat_ax(ax1, "l" if horiz else "b", ax2),
+                   _chart_val_ax(ax2, "b" if horiz else "l", ax1)))
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>'
+            '<c:chartSpace %s><c:date1904 val="0"/>'
+            '<c:roundedCorners val="0"/><c:chart>'
+            '<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/>%s</c:plotArea>'
+            '<c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend>'
+            '<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/>'
+            '</c:chart></c:chartSpace>' % (_CHART_NS, plot))
+
+
+def _chart_object_xml(chart_id, part_name, width, height):
+    """인라인(treatAsChar=1) <hp:chart> 봉투 (claw opInsertChart INLINE)."""
+    return (
+        '<hp:chart id="%d" zOrder="0" numberingType="PICTURE" '
+        'textWrap="INLINE" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" '
+        'chartIDRef="%s">'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" '
+        'heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" '
+        'allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" '
+        'vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+        '<hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:chart>'
+        % (chart_id, part_name, width, height))
+
+
+def _normalize_chart_data(chart_type, cat, series):
+    spec = _CHART_SPECS.get(chart_type)
+    if spec is None:
+        raise ValueError("--type은 %s 중 하나여야 합니다"
+                         % "/".join(sorted(_CHART_SPECS)))
+    if not isinstance(cat, list) or not cat:
+        raise ValueError("--cat은 비어있지 않은 JSON 배열이어야 합니다")
+    cat = [str(c) for c in cat]
+    if not isinstance(series, list) or not series:
+        raise ValueError("--series는 비어있지 않은 JSON 배열이어야 합니다")
+    norm = []
+    for i, s in enumerate(series):
+        if not isinstance(s, dict):
+            raise ValueError("series[%d]는 {name,values} 객체여야 합니다" % i)
+        vals = s.get("values", [])
+        if not isinstance(vals, list) or not vals:
+            raise ValueError("series[%d].values는 비어있지 않은 배열이어야 합니다"
+                             % i)
+        name = str(s["name"]) if s.get("name") is not None else "계열 %d" % (i + 1)
+        norm.append({"name": name, "values": vals})
+    if spec.get("pie"):
+        norm = [norm[0]]  # 원 차트는 첫 계열만
+    return spec, cat, norm
+
+
+def insert_chart_hwpx(src, dst, chart_type, cat, series, after=None, para=None,
+                      width=CHART_DEFAULT_W, height=CHART_DEFAULT_H,
+                      section_idx=0):
+    """OOXML 차트를 Chart/ 파트에 넣고 매니페스트 등록 + 섹션에 인라인 삽입.
+
+    --after(기준 문구) 또는 --para(문단 인덱스)로 위치 지정. 둘 다 없으면
+    해당 섹션 마지막 문단 뒤에 새 PLAIN 문단으로 차트를 붙인다(수식과 동일).
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("--width/--height는 양의 정수여야 합니다")
+    spec, cat, norm_series = _normalize_chart_data(chart_type, cat, series)
+
+    buf, names, xmls, _ = _load_doc(src)
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        namelist = zf.namelist()
+        hpf_name = next((n for n in namelist if n.endswith("content.hpf")), None)
+        if hpf_name is None:
+            raise ValueError("content.hpf(매니페스트)를 찾을 수 없습니다")
+        hpf_xml = zf.read(hpf_name).decode("utf-8")
+
+    # 고유 차트 파트명 + 매니페스트 id
+    n = 1
+    while (("Chart/chart%d.xml" % n) in namelist
+           or ('id="chart%d"' % n) in hpf_xml):
+        n += 1
+    part_name = "Chart/chart%d.xml" % n
+    item_id = "chart%d" % n
+
+    chartspace = _build_chartspace(spec, cat, norm_series)
+
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    ids = _fresh_ids(sec_xml, 2)
+    chart_obj = _chart_object_xml(ids[1], part_name, width, height)
+    m = re.search(r'charPrIDRef="(\d+)"', sec_xml[para_el.start:para_el.end])
+    char_id = m.group(1) if m else "0"
+    new_para = (
+        '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0"><hp:run charPrIDRef="%s">%s</hp:run></hp:p>'
+        % (ids[0], char_id, chart_obj))
+    new_sec = apply_splices(sec_xml, [(para_el.end, para_el.end, new_para)])
+
+    item = ('<opf:item id="%s" href="%s" media-type="application/xml"/>'
+            % (item_id, part_name))
+    if "</opf:manifest>" not in hpf_xml:
+        raise ValueError("content.hpf에 <opf:manifest>가 없습니다")
+    new_hpf = hpf_xml.replace("</opf:manifest>", item + "</opf:manifest>", 1)
+
+    patched = patch_zip_entries(buf, {
+        sec_name: new_sec.encode("utf-8"),
+        hpf_name: new_hpf.encode("utf-8"),
+    })
+    out = add_zip_entries(patched, {part_name: chartspace.encode("utf-8")})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return {"section": sec_name, "chart_part": part_name, "manifest": hpf_name,
+            "manifest_id": item_id, "chart_type": chart_type,
+            "chart_el": spec["el"], "series": len(norm_series),
+            "categories": len(cat)}
+
+
+# ─── P7: 글머리표·문단번호 목록 in-place 전환 ──────────────────────
+#
+# 한컴 목록 메커니즘: paraPr 안의 <hh:heading type="BULLET|NUMBER" idRef level/>
+# 이 문단의 paraPrIDRef가 가리키는 paraPr에 들어 있어야 한다. BULLET은 idRef가
+# <hh:bullets>의 bullet id를, NUMBER는 <hh:numberings>의 numbering id를 가리킨다.
+#
+# 전략(claw set_bullet_list/set_number_list/clear_list 포팅):
+#   1) 목록 정의를 header.xml에 보장(_ensure_bullet_def / _ensure_numbering_def).
+#   2) 대상 문단의 현재 paraPr를 복제(_add_cloned)하면서 <hh:heading>을 삽입/교체,
+#      문단의 paraPrIDRef를 복제본으로 재지정. 같은 base paraPr를 쓰는 문단들은
+#      복제본 하나를 공유(각 문단의 여백/정렬 보존).
+#   3) clear-list는 heading 요소를 제거한 복제본으로 재지정.
+#
+# ★한계(claw mistakes-06): 한컴독스 웹(클라우드 뷰어)은 자기가 만들지 않은
+#   합성 list paraPr의 <hh:heading type="BULLET|NUMBER">를 silent strip한다.
+#   웹 생존에는 Scripts/ 등 한컴 네이티브 전체 fingerprint 일치가 필요하다.
+#   이 구현은 데스크톱 한컴(한/글) 기준으로 목록 렌더링을 보장한다 — limitations 참조.
+
+_BULLET_PARAHEAD = (
+    '<hh:paraHead level="0" align="LEFT" useInstWidth="0" autoIndent="1" '
+    'widthAdjust="0" textOffsetType="PERCENT" textOffset="50" '
+    'numFormat="DIGIT" charPrIDRef="4294967295" checkable="0"/>')
+
+
+def _id_of(header_xml, el):
+    m = re.search(r'\bid="(\d+)"', header_xml[el.start:el.open_end])
+    return m.group(1) if m else None
+
+
+def _ensure_bullet_def(header_xml, char):
+    """글머리표(char) 정의를 header.xml의 <hh:bullets>에 보장. (idRef, header)."""
+    root = scan_xml(header_xml)
+    bullets = next(iter(descendants(root, "bullets")), None)
+    if bullets is None:
+        block = ('<hh:bullets itemCnt="1"><hh:bullet id="1" char="%s" '
+                 'useImage="0">%s</hh:bullet></hh:bullets>'
+                 % (escape_text(char), _BULLET_PARAHEAD))
+        anchor = header_xml.find('</hh:numberings>')
+        if anchor == -1:
+            raise ValueError("header.xml에 <hh:numberings>가 없어 "
+                             "<hh:bullets> 삽입 위치를 찾지 못함")
+        anchor += len('</hh:numberings>')
+        return "1", header_xml[:anchor] + block + header_xml[anchor:]
+    existing = direct_children(bullets, "bullet")
+    for b in existing:
+        seg = header_xml[b.start:b.open_end]
+        cm = re.search(r'\bchar="([^"]*)"', seg)
+        bid = _id_of(header_xml, b)
+        if cm and bid and decode_entities(cm.group(1)) == char:
+            return bid, header_xml
+    ids = [int(_id_of(header_xml, b)) for b in existing if _id_of(header_xml, b)]
+    new_id = (max(ids) + 1) if ids else 1
+    new_bullet = ('<hh:bullet id="%d" char="%s" useImage="0">%s</hh:bullet>'
+                  % (new_id, escape_text(char), _BULLET_PARAHEAD))
+    splices = [(bullets.content_end, bullets.content_end, new_bullet)]
+    seg = header_xml[bullets.start:bullets.open_end]
+    cm = re.search(r'itemCnt="(\d+)"', seg)
+    if cm:
+        splices.append((bullets.start + cm.start(), bullets.start + cm.end(),
+                        'itemCnt="%d"' % (int(cm.group(1)) + 1)))
+    return str(new_id), apply_splices(header_xml, splices)
+
+
+def _numbering_body(style):
+    def head(lvl, fmt, text):
+        return ('<hh:paraHead start="1" level="%d" align="LEFT" '
+                'useInstWidth="1" autoIndent="1" widthAdjust="0" '
+                'textOffsetType="PERCENT" textOffset="50" numFormat="%s" '
+                'charPrIDRef="4294967295" checkable="0">%s</hh:paraHead>'
+                % (lvl, fmt, text))
+
+    def empty(lvl):
+        return ('<hh:paraHead start="1" level="%d" align="LEFT" '
+                'useInstWidth="1" autoIndent="1" widthAdjust="0" '
+                'textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" '
+                'charPrIDRef="4294967295" checkable="0"/>' % lvl)
+
+    if style == "decimal":
+        return "".join(
+            head(lvl, "DIGIT", "".join("^%d." % (i + 1) for i in range(lvl)))
+            for lvl in range(1, 11))
+    # korean: 1./가./1)/가)/(1)/(가)
+    return (head(1, "DIGIT", "^1.") + head(2, "HANGUL_SYLLABLE", "^2.")
+            + head(3, "DIGIT", "^3)") + head(4, "HANGUL_SYLLABLE", "^4)")
+            + head(5, "DIGIT", "(^5)") + head(6, "HANGUL_SYLLABLE", "(^6)")
+            + empty(7) + empty(8) + empty(9) + empty(10))
+
+
+def _ensure_numbering_def(header_xml, style):
+    """문단번호 정의를 보장. style 미지정 시 기존 numbering 재사용. (idRef, header)."""
+    root = scan_xml(header_xml)
+    numberings = next(iter(descendants(root, "numberings")), None)
+    if numberings is None:
+        raise ValueError("header.xml에 <hh:numberings>가 없습니다")
+    nums = direct_children(numberings, "numbering")
+    if not style:
+        if nums:
+            return (_id_of(header_xml, nums[0]) or "1"), header_xml
+        style = "korean"
+    style = str(style).lower()
+    if style not in ("korean", "decimal"):
+        raise ValueError("style은 korean/decimal 중 하나여야 합니다")
+    want = "^1.^2." if style == "decimal" else "^2."
+    for n in nums:
+        ninner = header_xml[n.content_start:n.content_end]
+        m = re.search(r'<hh:paraHead\b[^>]*\blevel="2"[^>]*>([^<]*)</hh:paraHead>',
+                      ninner)
+        if m and m.group(1) == want:
+            return (_id_of(header_xml, n) or "1"), header_xml
+    ids = [int(_id_of(header_xml, n)) for n in nums if _id_of(header_xml, n)]
+    new_id = (max(ids) + 1) if ids else 1
+    new_num = ('<hh:numbering id="%d" start="1">%s</hh:numbering>'
+               % (new_id, _numbering_body(style)))
+    splices = [(numberings.content_end, numberings.content_end, new_num)]
+    seg = header_xml[numberings.start:numberings.open_end]
+    cm = re.search(r'itemCnt="(\d+)"', seg)
+    if cm:
+        splices.append((numberings.start + cm.start(),
+                        numberings.start + cm.end(),
+                        'itemCnt="%d"' % (int(cm.group(1)) + 1)))
+    return str(new_id), apply_splices(header_xml, splices)
+
+
+def _mutate_list_heading(htype, idref, level):
+    """paraPr inner에 <hh:heading>을 삽입/교체(또는 NONE이면 제거)하는 mutate."""
+    def m(open_tag, inner):
+        if htype == "NONE":
+            return open_tag, re.sub(r'<hh:heading\b[^>]*/>', "", inner, count=1)
+        heading = ('<hh:heading type="%s" idRef="%s" level="%d"/>'
+                   % (htype, idref, int(level)))
+        if re.search(r'<hh:heading\b[^>]*/>', inner):
+            inner = re.sub(r'<hh:heading\b[^>]*/>',
+                           lambda _m: heading, inner, count=1)
+        elif re.search(r'<hh:align\b[^>]*/>', inner):
+            inner = re.sub(r'<hh:align\b[^>]*/>',
+                           lambda mm: mm.group(0) + heading, inner, count=1)
+        else:
+            inner = heading + inner
+        return open_tag, inner
+    return m
+
+
+def _resolve_list_targets(names, xmls, after, para, to_para, section_idx):
+    """(section_name, [para_el, ...]) — --after(단일), --para[/--to](범위/단일)."""
+    if after is not None:
+        n, _x, p = _resolve_target_para(names, xmls, after, None, section_idx)
+        return n, [p]
+    if section_idx >= len(names):
+        raise ValueError("섹션 인덱스 초과: %d" % section_idx)
+    n = names[section_idx]
+    _, paras = _body_paragraphs(scan_xml(xmls[n]))
+    if not paras:
+        raise ValueError("섹션에 본문 문단(<hp:p>)이 없습니다")
+
+    def norm(i):
+        return i if i >= 0 else len(paras) + i
+
+    if para is None and to_para is None:
+        return n, [paras[-1]]
+    start = 0 if para is None else norm(para)
+    end = start if to_para is None else norm(to_para)
+    if start > end:
+        start, end = end, start
+    if start < 0 or end >= len(paras):
+        raise ValueError("문단 인덱스 초과: %d..%d (문단 %d개)"
+                         % (start, end, len(paras)))
+    return n, paras[start:end + 1]
+
+
+def set_list_hwpx(src, dst, list_type, after=None, para=None, to_para=None,
+                  level=0, char=None, style=None, section_idx=0):
+    """대상 본문 문단(들)을 글머리표/문단번호 목록으로 전환하거나 해제."""
+    if list_type not in ("bullet", "number", "clear"):
+        raise ValueError("list_type은 bullet/number/clear 중 하나")
+    buf, names, xmls, header_xml = _load_doc(src)
+    if header_xml is None:
+        raise ValueError("header.xml이 없습니다")
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        header_name = next((nm for nm in zf.namelist()
+                            if _HEADER_XML_RE.search(nm)), None)
+    sec_name, targets = _resolve_list_targets(
+        names, xmls, after, para, to_para, section_idx)
+    sec_xml = xmls[sec_name]
+
+    idref = None
+    if list_type == "bullet":
+        htype = "BULLET"
+        idref, header_xml = _ensure_bullet_def(header_xml, char or "•")
+    elif list_type == "number":
+        htype = "NUMBER"
+        idref, header_xml = _ensure_numbering_def(header_xml, style)
+    else:
+        htype = "NONE"
+
+    base_to_new = {}
+    splices = []
+    for p in targets:
+        seg = sec_xml[p.start:p.open_end]
+        bm = re.search(r'paraPrIDRef="(\d+)"', seg)
+        base_pid = bm.group(1) if bm else "0"
+        if base_pid not in base_to_new:
+            new_id, header_xml = _add_cloned(
+                header_xml, "paraProperties", "paraPr", base_pid,
+                _mutate_list_heading(htype, idref, level))
+            base_to_new[base_pid] = new_id
+        new_id = base_to_new[base_pid]
+        rm = re.search(r'paraPrIDRef="\d+"', seg)
+        if rm:
+            splices.append((p.start + rm.start(), p.start + rm.end(),
+                            'paraPrIDRef="%s"' % new_id))
+        _strip_para_linesegs(sec_xml, p, splices)
+
+    new_sec = apply_splices(sec_xml, splices)
+    _write_doc(buf, dst, {header_name: header_xml, sec_name: new_sec})
+    return {"action": "set-list", "type": list_type, "section": sec_name,
+            "paragraphs": len(targets), "newParaPrIds": list(base_to_new.values()),
+            "idRef": idref, "level": int(level),
+            "char": (char or "•") if list_type == "bullet" else None,
+            "style": style if list_type == "number" else None}
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -2850,6 +4191,147 @@ def main():
     p_ps.add_argument("--line-spacing", type=int, dest="line_spacing",
                       help="줄간격 퍼센트 (예: 160)")
     p_ps.add_argument("--section", type=int, default=0)
+
+    for _cmd, _h in (("add-footnote", "각주(footNote) 삽입"),
+                     ("add-endnote", "미주(endNote) 삽입")):
+        _p = sub.add_parser(_cmd, help=_h)
+        _p.add_argument("input")
+        _p.add_argument("output")
+        _p.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+        _p.add_argument("--para",
+                        help="문단 인덱스(0-base, last/-1=마지막). "
+                             "--after/--para 미지정 시 마지막 문단")
+        _p.add_argument("--text", required=True, help="주석 내용")
+        _p.add_argument("--section", type=int, default=0)
+
+    p_hl = sub.add_parser("add-hyperlink",
+                          help="클릭 가능한 URL 하이퍼링크 삽입")
+    p_hl.add_argument("input")
+    p_hl.add_argument("output")
+    p_hl.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_hl.add_argument("--para",
+                      help="문단 인덱스(0-base, last/-1=마지막)")
+    p_hl.add_argument("--url", required=True, help="링크 주소")
+    p_hl.add_argument("--text", required=True, help="표시 문구")
+    p_hl.add_argument("--section", type=int, default=0)
+
+    p_bm = sub.add_parser("add-bookmark", help="책갈피(bookmark) 마커 삽입")
+    p_bm.add_argument("input")
+    p_bm.add_argument("output")
+    p_bm.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_bm.add_argument("--para",
+                      help="문단 인덱스(0-base, last/-1=마지막)")
+    p_bm.add_argument("--name", required=True, help="책갈피 이름")
+    p_bm.add_argument("--section", type=int, default=0)
+
+    # ── P9: 페이지 설정·다단·쪽/단 나누기 ──
+    p_pb = sub.add_parser("page-break", help="대상 문단에 쪽 나누기(pageBreak) 설정")
+    p_pb.add_argument("input")
+    p_pb.add_argument("output")
+    p_pb.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_pb.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막). "
+                                     "--after/--para 미지정 시 마지막 문단")
+    p_pb.add_argument("--off", action="store_true", help="쪽 나누기 해제(0)")
+    p_pb.add_argument("--section", type=int, default=0)
+
+    p_cb = sub.add_parser("column-break", help="대상 문단에 단 나누기(columnBreak) 설정")
+    p_cb.add_argument("input")
+    p_cb.add_argument("output")
+    p_cb.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+    p_cb.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막)")
+    p_cb.add_argument("--off", action="store_true", help="단 나누기 해제(0)")
+    p_cb.add_argument("--section", type=int, default=0)
+
+    p_sc = sub.add_parser("set-columns", help="다단(단/칼럼) 설정. count=1=단일")
+    p_sc.add_argument("input")
+    p_sc.add_argument("output")
+    p_sc.add_argument("--count", type=int, required=True, help="단 수(1 이상)")
+    p_sc.add_argument("--gap-mm", type=float, dest="gap_mm",
+                      help="단 사이 간격(mm, count>1일 때, 기본≈4mm)")
+
+    p_sp = sub.add_parser("set-page", help="편집 용지(크기/방향/여백) 변경")
+    p_sp.add_argument("input")
+    p_sp.add_argument("output")
+    p_sp.add_argument("--orientation", choices=["portrait", "landscape"],
+                      help="용지 방향")
+    p_sp.add_argument("--margin-mm", type=float, dest="margin_mm",
+                      help="상하좌우 여백(mm)")
+    p_sp.add_argument("--size", help="용지 프리셋 (a3/a4/a5/b4/b5/b6/letter/legal)")
+    p_sp.add_argument("--width-mm", type=float, dest="width_mm",
+                      help="용지 너비(mm) — size보다 우선")
+    p_sp.add_argument("--height-mm", type=float, dest="height_mm",
+                      help="용지 높이(mm) — size보다 우선")
+
+    p_ic = sub.add_parser("insert-chart",
+                          help="네이티브 차트 삽입 (OOXML chartSpace 파트)")
+    p_ic.add_argument("input")
+    p_ic.add_argument("output")
+    p_ic.add_argument("--type", required=True, dest="chart_type",
+                      choices=["col", "bar", "line", "area", "pie"],
+                      help="차트 종류 (세로막대/가로막대/꺾은선/영역/원)")
+    p_ic.add_argument("--cat", required=True,
+                      help='범주 라벨 JSON 배열 파일 (예: ["1월","2월","3월"])')
+    p_ic.add_argument("--series", required=True,
+                      help='계열 JSON [{"name","values":[..]}] 파일')
+    p_ic.add_argument("--after",
+                      help="기준 문구 (이 문구가 든 본문 문단 뒤에 삽입)")
+    p_ic.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막). "
+                                     "--after/--para 미지정 시 마지막 문단 뒤")
+    p_ic.add_argument("--width", type=int, default=CHART_DEFAULT_W,
+                      help="너비 HWPUNIT (기본 %d)" % CHART_DEFAULT_W)
+    p_ic.add_argument("--height", type=int, default=CHART_DEFAULT_H,
+                      help="높이 HWPUNIT (기본 %d)" % CHART_DEFAULT_H)
+    p_ic.add_argument("--section", type=int, default=0)
+
+    for _cmd, _h in (("set-bullet-list", "문단을 글머리표(•) 목록으로 전환"),
+                     ("set-number-list", "문단을 번호목록(1. 2. 3.)으로 전환"),
+                     ("clear-list", "문단의 목록 서식 해제")):
+        _p = sub.add_parser(_cmd, help=_h)
+        _p.add_argument("input")
+        _p.add_argument("output")
+        _p.add_argument("--after", help="기준 문구(이 문구가 든 문단 대상)")
+        _p.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막). "
+                                       "미지정 시 마지막 문단")
+        _p.add_argument("--to", dest="to_para",
+                        help="범위 끝 문단 인덱스(--para부터 여기까지 포함)")
+        _p.add_argument("--level", type=int, default=0, help="목록 수준(0-base)")
+        _p.add_argument("--section", type=int, default=0)
+        if _cmd == "set-bullet-list":
+            _p.add_argument("--char", help="글머리표 문자(기본 •, 예: ▶ ◯ □ ★)")
+        if _cmd == "set-number-list":
+            _p.add_argument("--style", choices=["korean", "decimal"],
+                            help="번호 형식 (korean: 1./가./1) · decimal: 1./1.1.)")
+
+    p_seal = sub.add_parser(
+        "place-seal", help="기준 문구 옆에 떠있는 직인/서명 그림 삽입")
+    p_seal.add_argument("input")
+    p_seal.add_argument("output")
+    p_seal.add_argument("--image", required=True,
+                        help="직인/서명 PNG·JPG 경로(사용자 제공)")
+    p_seal.add_argument("--anchor", required=True,
+                        help='기준 문구(예: 발신명의·"서명 또는 인")')
+    p_seal.add_argument("--size-mm", type=float, default=SEAL_DEFAULT_MM,
+                        dest="size_mm", help="직인 세로 크기 mm (기본 20)")
+    p_seal.add_argument("--dx-mm", type=float, default=0.0, dest="dx_mm",
+                        help="가로 미세조정 mm (오른쪽+)")
+    p_seal.add_argument("--dy-mm", type=float, default=0.0, dest="dy_mm",
+                        help="세로 미세조정 mm (아래+)")
+    p_seal.add_argument("--occurrence", type=int, default=0,
+                        help="같은 문구가 여러 곳이면 몇 번째(0-base)")
+
+    p_img = sub.add_parser(
+        "insert-image", help="일반 이미지 삽입 (블록 또는 --inline)")
+    p_img.add_argument("input")
+    p_img.add_argument("output")
+    p_img.add_argument("--image", required=True, help="이미지 PNG·JPG 경로")
+    p_img.add_argument("--after", help="기준 문구(이 문단 뒤/끝에 삽입)")
+    p_img.add_argument("--para", type=int,
+                       help="문단 인덱스(0-base, 음수=뒤에서)")
+    p_img.add_argument("--inline", action="store_true",
+                       help="기준 문단 끝에 글자처럼 삽입(기본은 새 문단 블록)")
+    p_img.add_argument("--size-mm", type=float, nargs="+", dest="size_mm",
+                       help="크기 mm: 폭만 또는 '폭 높이'. 미지정 시 원본 크기")
+    p_img.add_argument("--section", type=int, default=0)
 
     args = parser.parse_args()
 
@@ -3057,6 +4539,110 @@ def main():
                 args.input, args.output, after=args.after,
                 para=_parse_para(args.para), align=args.align,
                 line_spacing=args.line_spacing, section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "place-seal":
+            info = place_seal_hwpx(
+                args.input, args.output, image=args.image, anchor=args.anchor,
+                size_mm=args.size_mm, dx_mm=args.dx_mm, dy_mm=args.dy_mm,
+                occurrence=args.occurrence)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "insert-image":
+            sz = args.size_mm
+            if sz is not None and len(sz) > 2:
+                raise ValueError("--size-mm은 값 1개(폭) 또는 2개(폭 높이)")
+            width_mm = sz[0] if sz else None
+            height_mm = sz[1] if sz and len(sz) >= 2 else None
+            info = insert_image_hwpx(
+                args.input, args.output, image=args.image, after=args.after,
+                para=args.para, inline=args.inline, width_mm=width_mm,
+                height_mm=height_mm, section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command in ("add-footnote", "add-endnote"):
+            kind = "footNote" if args.command == "add-footnote" else "endNote"
+            info = add_note_hwpx(
+                args.input, args.output, kind, args.text,
+                after=args.after, para=_parse_para(args.para),
+                section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "add-hyperlink":
+            info = add_hyperlink_hwpx(
+                args.input, args.output, args.url, args.text,
+                after=args.after, para=_parse_para(args.para),
+                section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "add-bookmark":
+            info = add_bookmark_hwpx(
+                args.input, args.output, args.name,
+                after=args.after, para=_parse_para(args.para),
+                section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command in ("page-break", "column-break"):
+            kind = "page" if args.command == "page-break" else "column"
+            info = set_para_break_hwpx(
+                args.input, args.output, kind, after=args.after,
+                para=_parse_para(args.para), on=not args.off,
+                section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "set-columns":
+            info = set_columns_hwpx(args.input, args.output, args.count,
+                                    gap_mm=args.gap_mm)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "set-page":
+            info = set_page_hwpx(
+                args.input, args.output, orientation=args.orientation,
+                margin_mm=args.margin_mm, size=args.size,
+                width_mm=args.width_mm, height_mm=args.height_mm)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "insert-chart":
+            cat = load_values(args.cat)
+            series = load_values(args.series)
+            info = insert_chart_hwpx(
+                args.input, args.output, args.chart_type, cat, series,
+                after=args.after, para=_parse_para(args.para),
+                width=args.width, height=args.height,
+                section_idx=args.section)
+            _print({"input": args.input, "output": args.output, **info,
+                    "modified_entries": [info["section"], info["manifest"],
+                                         info["chart_part"]],
+                    "ok": True})
+            return 0
+
+        if args.command in ("set-bullet-list", "set-number-list", "clear-list"):
+            ltype = {"set-bullet-list": "bullet",
+                     "set-number-list": "number",
+                     "clear-list": "clear"}[args.command]
+            info = set_list_hwpx(
+                args.input, args.output, ltype, after=args.after,
+                para=_parse_para(args.para), to_para=_parse_para(args.to_para),
+                level=args.level, char=getattr(args, "char", None),
+                style=getattr(args, "style", None), section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
