@@ -32,6 +32,7 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── bodojaryo.py           # ★ 정부 표준 보도자료 생성기 (레퍼런스 복제 방식)
 │   ├── gyehoek.py             # ★ 공공기관 계획서 생성기 (행안부 업무계획 복제, 제목/목차 토글)
 │   ├── gyehoek_hook.py        # ★ PreToolUse 훅 — 계획서 생성 전 제목/목차 포함 여부 강제 질문
+│   ├── report_placeholder_hook.py  # ★ PreToolUse 훅 — '브라더 공기관' 예시 보고서 전달 차단
 │   └── office/{unpack,pack}.py
 ├── templates/
 │   ├── base/                  # 베이스 Skeleton
@@ -483,6 +484,32 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" add-para doc.hwpx out.hwpx \
 # 여러 개: --paras paras.json  ([{"after": "...", "text": "..."}])
 ```
 
+### 머리말·꼬리말·쪽번호: `set-header` / `set-footer` / `set-pagenum`
+
+기존 .hwpx에 페이지 머리말(상단)·꼬리말(하단)·자동 쪽번호를 사후 삽입/갱신/제거한다.
+섹션 첫 문단(secPr) 뒤에 `<hp:ctrl>` 봉투로 넣으며, 본문 바이트는 보존된다. 같은 종류가
+이미 있으면 **새로 만들지 않고 갱신**(중복 방지)한다.
+
+```bash
+# 머리말/꼬리말 삽입·갱신 (--apply BOTH|EVEN|ODD, --align LEFT|CENTER|RIGHT)
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-header doc.hwpx out.hwpx --text "대외주의" --align center
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-footer doc.hwpx out.hwpx --text "한국연구재단"
+
+# 자동 쪽번호 (--where footer|header). 해당 머리말/꼬리말이 있으면 그 안에 번호를 추가
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-pagenum doc.hwpx out.hwpx --where footer --align center
+
+# 제거
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" remove-header doc.hwpx out.hwpx
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" remove-footer doc.hwpx out.hwpx
+```
+
+- `--align`은 **best-effort**: header.xml에 해당 가로정렬(`<hh:align horizontal=...>`) paraPr가
+  이미 있으면 그 id를 재사용하고, 없으면 기본 정렬로 폴백한다(응답 JSON의 `align` 필드에 표시).
+  정부 표준 양식(report/gonmun2025 등)은 CENTER paraPr를 보유해 가운데 정렬이 바로 적용된다.
+- 텍스트 갱신 시 기존 머리말의 id·정렬·applyPageType는 보존된다(`--align`/`--apply` 미지정 시).
+  한 문서에 머리말/꼬리말 슬롯이 여러 개면 **전부** 같은 텍스트로 갱신한다(정부 양식은
+  머리말 슬롯을 2개 두기도 해서, 첫 개만 채우면 일부 페이지에 안 보이는 사고가 난다).
+
 ### 좌표 지정 폴백: `fill --cells`
 
 라벨 휴리스틱이 안 통하는 복잡한 표는 `analyze`가 보고한 좌표로 직접 채운다.
@@ -527,6 +554,12 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 없는 환경(다른 에이전트 등)에서는 위 게이트를 LLM이 직접 지켜야 한다. 등록 방법은
 스크립트 상단 주석 참조.
 
+`scripts/report_placeholder_hook.py`(PreToolUse, matcher: Bash)는 보고서 템플릿
+(`assets/report-template.hwpx`)의 예시 기관명 **'브라더 공기관'이 남은 .hwpx를 실제
+보고서로 전달(open/Downloads·Desktop 복사)하려 하면 차단**한다. 이 placeholder는
+템플릿 구조 보존을 위해 파일에 남겨두되, 전달 전 반드시 `fill_hwpx.py replace`로 실제
+기관명으로 교체해야 한다(내부 작업용 복제는 막지 않음). 등록 방법은 스크립트 상단 주석 참조.
+
 ### 워크플로우 J vs F vs B 선택 기준
 
 | 상황 | 도구 |
@@ -534,6 +567,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | 빈 양식(신청서·서식)의 필드 채우기 — 라벨/체크박스/빈칸 | **J `fill`** |
 | 작성된 문서의 기존 문구를 새 문구로 교체 | **J `replace`** (run 분할 대응) → 실패 시 F |
 | 표에 데이터 행 추가 | **J `add-row`** |
+| 머리말/꼬리말/쪽번호 사후 추가·제거 | **J `set-header`/`set-footer`/`set-pagenum`/`remove-*`** |
 | 라벨 매칭 실패한 복잡한 표 | **J `fill --cells`** (좌표 지정) |
 | XML 전역 일괄 치환 (메타데이터 포함) | F (clone_form.py) |
 | `{{이름}}` 같은 플레이스홀더가 박힌 전용 템플릿 | B |
