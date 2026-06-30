@@ -4049,6 +4049,108 @@ def set_list_hwpx(src, dst, list_type, after=None, para=None, to_para=None,
             "style": style if list_type == "number" else None}
 
 
+# ─── 문서 테마 (claw-hwp theme 포팅 — 한국 공문서용 정제 세트) ──────────
+#
+# 제목/머리 글자색과 표 머리행 배경색을 테마 한 단어로 일괄 적용한다.
+# in-place: 기존 .hwpx의 heading charPr(본문보다 큰 글자=제목/머리 휴리스틱)
+# textColor를 바꾸고, 각 표 row0 셀 borderFill 배경을 테마색으로(set-cell과
+# 동일 메커니즘). 글꼴 변경은 fontface 등록이 필요해 새 문서 생성 경로에서 다룬다.
+
+THEMES = {
+    "기본":   {"heading": "#000000", "table_header": "#D9D9D9"},
+    "남색":   {"heading": "#1F3864", "table_header": "#D6DCE5"},
+    "진녹":   {"heading": "#375623", "table_header": "#E2EFDA"},
+    "진회색": {"heading": "#3B3838", "table_header": "#D9D9D9"},
+}
+_THEME_ALIAS = {"default": "기본", "navy": "남색", "green": "진녹",
+                "charcoal": "진회색", "gray": "진회색", "grey": "진회색"}
+
+
+def set_theme_hwpx(src, dst, theme=None, heading_color=None,
+                   table_header_color=None):
+    """기존 문서에 테마(제목색·표머리색) in-place 적용."""
+    if theme:
+        key = _THEME_ALIAS.get(theme.lower(), theme)
+        if key not in THEMES:
+            raise ValueError("테마는 %s (또는 영문 alias) 중 하나"
+                             % "/".join(THEMES))
+        heading_color = heading_color or THEMES[key]["heading"]
+        table_header_color = table_header_color or THEMES[key]["table_header"]
+    if not heading_color and not table_header_color:
+        raise ValueError("--theme 또는 --heading-color/--table-header-color 필요")
+    buf, names, xmls, header_xml = _load_doc(src)
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        header_name = next((n for n in zf.namelist()
+                            if _HEADER_XML_RE.search(n)), None)
+    if header_name is None:
+        raise ValueError("header.xml이 없습니다")
+    changed = {}
+    headings = 0
+
+    # 1) 제목/머리 charPr 색 (본문보다 큰 글자 = heading 휴리스틱)
+    if heading_color:
+        hc = _norm_hex(heading_color)
+        used = set()
+        for n in names:
+            used |= set(re.findall(r'charPrIDRef="(\d+)"', xmls[n]))
+        cps = []
+        for c in descendants(scan_xml(header_xml), "charPr"):
+            seg = header_xml[c.start:c.open_end]
+            mid = re.search(r'\bid="(\d+)"', seg)
+            mh = re.search(r'\bheight="(\d+)"', seg)
+            if mid and mh and mid.group(1) in used:
+                cps.append((c, int(mh.group(1))))
+        if cps:
+            hts = sorted(h for _, h in cps)
+            med = hts[len(hts) // 2]
+            thresh = max(med * 1.2, med + 100)   # 제목은 본문보다 1.2배+ 큼
+            splices = []
+            for c, h in cps:
+                if h >= thresh:
+                    seg = header_xml[c.start:c.open_end]
+                    new = _set_open_attr(seg, "textColor", hc)
+                    if new != seg:
+                        splices.append((c.start, c.open_end, new))
+                        headings += 1
+            if splices:
+                header_xml = apply_splices(header_xml, splices)
+
+    # 2) 표 머리행(row 0) 셀 배경
+    cells = 0
+    if table_header_color:
+        thc = _norm_hex(table_header_color)
+        for n in names:
+            xml = xmls[n]
+            splices = []
+            for tbl in descendants(scan_xml(xml), "tbl"):
+                rows = direct_children(tbl, "tr")
+                if not rows:
+                    continue
+                for tc in direct_children(rows[0], "tc"):
+                    m = re.search(r'borderFillIDRef="(\d+)"',
+                                  xml[tc.start:tc.open_end])
+                    if not m:
+                        continue
+                    inner, open_tag = _bf_by_id(header_xml, m.group(1))
+                    if inner is None:
+                        continue
+                    new_id, header_xml = _ensure_borderfill(
+                        header_xml, _set_fill_inner(inner, thc), open_tag)
+                    if new_id != m.group(1):
+                        splices.append((tc.start + m.start(), tc.start + m.end(),
+                                        'borderFillIDRef="%s"' % new_id))
+                        cells += 1
+            if splices:
+                xmls[n] = apply_splices(xml, splices)
+                changed[n] = xmls[n]
+
+    changed[header_name] = header_xml
+    _write_doc(buf, dst, changed)
+    return {"action": "theme", "theme": theme, "heading_color": heading_color,
+            "table_header_color": table_header_color,
+            "headings_recolored": headings, "header_cells_colored": cells}
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -4368,6 +4470,16 @@ def main():
                        help="크기 mm: 폭만 또는 '폭 높이'. 미지정 시 원본 크기")
     p_img.add_argument("--section", type=int, default=0)
 
+    p_th = sub.add_parser("set-theme",
+                          help="문서 테마(제목색·표머리색) in-place 적용")
+    p_th.add_argument("input")
+    p_th.add_argument("output")
+    p_th.add_argument("--theme", help="기본/남색/진녹/진회색 (또는 default/navy/green/charcoal)")
+    p_th.add_argument("--heading-color", dest="heading_color",
+                      help="제목/머리 글자색 RRGGBB (테마 override)")
+    p_th.add_argument("--table-header-color", dest="table_header_color",
+                      help="표 머리행 배경색 RRGGBB (테마 override)")
+
     args = parser.parse_args()
 
     def _parse_para(v):
@@ -4583,6 +4695,15 @@ def main():
                 args.input, args.output, image=args.image, anchor=args.anchor,
                 size_mm=args.size_mm, dx_mm=args.dx_mm, dy_mm=args.dy_mm,
                 occurrence=args.occurrence, overlap=args.overlap)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "set-theme":
+            info = set_theme_hwpx(
+                args.input, args.output, theme=args.theme,
+                heading_color=args.heading_color,
+                table_header_color=args.table_header_color)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
