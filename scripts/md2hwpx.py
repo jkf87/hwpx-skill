@@ -537,6 +537,8 @@ def main():
                         help="네임스페이스 후처리 실행 (기본: 활성)")
     parser.add_argument("--no-fix-ns", action="store_true",
                         help="네임스페이스 후처리 건너뛰기")
+    parser.add_argument("--theme",
+                        help="문서 테마(기본/남색/진녹/진회색) — 생성 후 제목색·표머리색 적용")
     args = parser.parse_args()
 
     if not args.input.is_file():
@@ -593,6 +595,17 @@ def main():
                 print(f"WARNING: 네임스페이스 후처리 실패:\n{ns_result.stderr}", file=sys.stderr)
         else:
             print(f"WARNING: fix_namespaces.py 없음: {fix_script}", file=sys.stderr)
+
+    # 5.5 테마 적용 (생성된 문서에 제목색·표머리색 in-place)
+    if args.theme:
+        try:
+            sys.path.insert(0, str(SCRIPT_DIR))
+            from fill_hwpx import set_theme_hwpx
+            r = set_theme_hwpx(str(args.output), str(args.output), theme=args.theme)
+            print(f"테마 '{args.theme}' 적용: 제목 {r['headings_recolored']}개, "
+                  f"표머리 {r['header_cells_colored']}칸")
+        except Exception as e:  # noqa: BLE001
+            print(f"WARNING: 테마 적용 실패: {e}", file=sys.stderr)
 
     # 6. 검증
     validate_script = SCRIPT_DIR / "validate.py"

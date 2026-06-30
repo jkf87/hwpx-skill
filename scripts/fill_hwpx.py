@@ -4049,6 +4049,320 @@ def set_list_hwpx(src, dst, list_type, after=None, para=None, to_para=None,
             "style": style if list_type == "number" else None}
 
 
+# ─── 도형/글상자 (P11: 사각형 + 글상자, claw insert_shape/textbox 포팅) ──
+#
+# floating <hp:rect>를 대상 문단(--after/--para) 뒤 새 문단에 삽입. 글상자는
+# 같은 rect에 <hp:drawText>(텍스트 한 문단)를 얹은 것. 채움/테두리 색 지정.
+# claw buildShape의 rect 봉투/속성을 그대로 따른다(순수 stdlib).
+
+_MATRIX3 = ('<hp:renderingInfo>'
+            '<hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+            '<hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+            '<hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+            '</hp:renderingInfo>')
+
+
+def _rect_xml(xml, w, h, fill, line, text=None, dx=0, dy=0, margin=0,
+              line_w=33):
+    """floating <hp:rect> (text 있으면 글상자). w/h/dx/dy/margin=HWPUNIT."""
+    rid, inst = _fresh_ids(xml, 2)
+    wrap = "SQUARE" if text is not None else "IN_FRONT_OF_TEXT"
+    draw = ""
+    if text is not None:
+        pid = _fresh_ids(xml, 1)[0]
+        draw = (
+            '<hp:drawText lastWidth="4294967295" name="" editable="0">'
+            '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" '
+            'vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" '
+            'textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+            '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+            'columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>%s'
+            '</hp:t></hp:run></hp:p></hp:subList></hp:drawText>'
+            % (pid, escape_text(text)))
+    return (
+        '<hp:rect id="%d" zOrder="0" numberingType="PICTURE" textWrap="%s" '
+        'textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" '
+        'groupLevel="0" instid="%d" ratio="0">'
+        '<hp:offset x="0" y="0"/><hp:orgSz width="%d" height="%d"/>'
+        '<hp:curSz width="0" height="0"/>'
+        '<hp:flip horizontal="0" vertical="0"/>'
+        '<hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>'
+        '%s'
+        '<hp:lineShape color="%s" width="%d" style="SOLID" endCap="FLAT" '
+        'headStyle="NORMAL" tailStyle="NORMAL" headfill="1" tailfill="1" '
+        'headSz="SMALL_SMALL" tailSz="SMALL_SMALL" outlineStyle="NORMAL" '
+        'alpha="0"/>'
+        '<hc:fillBrush><hc:winBrush faceColor="%s" hatchColor="#000000" '
+        'alpha="0"/></hc:fillBrush>'
+        '<hp:shadow type="NONE" color="#B2B2B2" offsetX="0" offsetY="0" '
+        'alpha="0"/>%s'
+        '<hc:pt0 x="0" y="0"/><hc:pt1 x="%d" y="0"/><hc:pt2 x="%d" y="%d"/>'
+        '<hc:pt3 x="0" y="%d"/>'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" '
+        'heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="0" '
+        'allowOverlap="1" holdAnchorAndSO="0" vertRelTo="PARA" '
+        'horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="%d" '
+        'horzOffset="%d"/>'
+        '<hp:outMargin left="%d" right="%d" top="%d" bottom="%d"/>'
+        '<hp:shapeComment>%s</hp:shapeComment></hp:rect>'
+        % (rid, wrap, inst, w, h, _MATRIX3, line, line_w, fill, draw,
+           w, w, h, h, w, h, dy, dx, margin, margin, margin, margin,
+           "글상자" if text is not None else "사각형"))
+
+
+def _insert_floating_para(src, dst, after, para, section_idx, build_inner):
+    """대상 문단 뒤에 floating 개체를 담은 새 문단을 삽입(공통)."""
+    buf, names, xmls, _ = _load_doc(src)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    m = re.search(r'charPrIDRef="(\d+)"', sec_xml[para_el.start:para_el.end])
+    char_id = m.group(1) if m else "0"
+    inner = build_inner(sec_xml)
+    new_para = (
+        '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0"><hp:run charPrIDRef="%s">%s</hp:run></hp:p>'
+        % (_fresh_para_id(sec_xml), char_id, inner))
+    new_xml = apply_splices(sec_xml, [(para_el.end, para_el.end, new_para)])
+    _write_doc(buf, dst, {sec_name: new_xml})
+    return sec_name
+
+
+def insert_shape_hwpx(src, dst, after=None, para=None, shape="rect",
+                      width_mm=50.0, height_mm=20.0, fill="FFFFFF",
+                      line="000000", section_idx=0):
+    if shape != "rect":
+        raise ValueError("현재 shape는 rect만 지원합니다")
+    w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
+    h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    fc, lc = _norm_hex(fill), _norm_hex(line)
+    sec = _insert_floating_para(
+        src, dst, after, para, section_idx,
+        lambda x: _rect_xml(x, w, h, fc, lc))
+    return {"action": "insert-shape", "shape": shape, "section": sec,
+            "fill": fc, "line": lc}
+
+
+def insert_textbox_hwpx(src, dst, text, after=None, para=None,
+                        width_mm=60.0, height_mm=25.0, fill="FFFFFF",
+                        line="000000", section_idx=0):
+    if text is None:
+        raise ValueError("--text(글상자 내용)가 필요합니다")
+    w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
+    h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    fc, lc = _norm_hex(fill), _norm_hex(line)
+    sec = _insert_floating_para(
+        src, dst, after, para, section_idx,
+        lambda x: _rect_xml(x, w, h, fc, lc, text=str(text), margin=567))
+    return {"action": "insert-textbox", "section": sec, "text": text,
+            "fill": fc, "line": lc}
+
+
+# ─── 이미지 편집 (P13: 기존 그림 목록/리사이즈/교체/삭제) ──────────────
+#
+# 문서 순서 hp:pic을 인덱스로 지정해 편집한다. resize는 표시 크기(hp:sz/curSz)만
+# 바꿔 모든 포맷 pic에 안전(원본 geometry 보존). replace는 새 이미지를 BinData에
+# 넣고 binaryItemIDRef를 repoint(표시 박스 유지). delete는 pic(전용 run이면 run째)
+# 제거. 변경 엔트리만 재기록(원본 보존). 인덱스는 list-images로 확인.
+
+
+def _list_pics(names, xmls):
+    """문서 순서 hp:pic 목록: [(section, el, binref, w_hu, h_hu)]."""
+    out = []
+    for n in names:
+        x = xmls[n]
+        for pic in descendants(scan_xml(x), "pic"):
+            seg = x[pic.start:pic.end]
+            br = re.search(r'binaryItemIDRef="([^"]+)"', seg)
+            sz = re.search(r'<hp:sz width="(\d+)"[^>]*?\bheight="(\d+)"', seg)
+            out.append((n, pic, br.group(1) if br else None,
+                        int(sz.group(1)) if sz else 0,
+                        int(sz.group(2)) if sz else 0))
+    return out
+
+
+def _pic_at(src, index):
+    """(buf, names, xmls, pics, target) — index 검증 포함."""
+    buf, names, xmls, _ = _load_doc(src)
+    pics = _list_pics(names, xmls)
+    if not pics:
+        raise ValueError("문서에 이미지(hp:pic)가 없습니다")
+    if index < 0 or index >= len(pics):
+        raise ValueError("이미지 인덱스 초과: %d (이미지 %d개, 0..%d)"
+                         % (index, len(pics), len(pics) - 1))
+    return buf, names, xmls, pics, pics[index]
+
+
+def list_images_hwpx(src):
+    buf, names, xmls, _ = _load_doc(src)
+    pics = _list_pics(names, xmls)
+    items = []
+    for i, (n, pic, br, w, h) in enumerate(pics):
+        items.append({"index": i, "section": n, "binaryItemIDRef": br,
+                      "width_mm": round(w / HWPUNIT_PER_MM, 1),
+                      "height_mm": round(h / HWPUNIT_PER_MM, 1)})
+    return {"count": len(items), "images": items}
+
+
+def resize_image_hwpx(src, dst, index, width_mm, height_mm=None):
+    buf, names, xmls, pics, (n, pic, br, w0, h0) = _pic_at(src, index)
+    w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
+    if height_mm:
+        h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    elif w0:
+        h = max(1, int(round(h0 * (w / w0))))      # 가로세로비 유지
+    else:
+        h = w
+    x = xmls[n]
+    seg = x[pic.start:pic.end]
+    seg = re.sub(r'(<hp:sz width=")\d+("[^>]*?\bheight=")\d+(")',
+                 lambda m: m.group(1) + str(w) + m.group(2) + str(h) + m.group(3),
+                 seg, count=1)
+    seg = re.sub(r'(<hp:curSz width=")\d+(" height=")\d+(")',
+                 lambda m: m.group(1) + str(w) + m.group(2) + str(h) + m.group(3),
+                 seg, count=1)
+    _write_doc(buf, dst, {n: x[:pic.start] + seg + x[pic.end:]})
+    return {"action": "resize-image", "index": index, "section": n,
+            "width_mm": round(w / HWPUNIT_PER_MM, 1),
+            "height_mm": round(h / HWPUNIT_PER_MM, 1)}
+
+
+def replace_image_hwpx(src, dst, index, image):
+    buf, names, xmls, pics, (n, pic, br, w0, h0) = _pic_at(src, index)
+    hpf_name = _find_hpf_name(buf)
+    if not hpf_name:
+        raise ValueError("content.hpf를 찾을 수 없습니다")
+    item_id, entry, ext, data, aspect, nat_w, nat_h = _embed_image(buf, image)
+    x = xmls[n]
+    seg = re.sub(r'binaryItemIDRef="[^"]+"',
+                 'binaryItemIDRef="%s"' % item_id, x[pic.start:pic.end], count=1)
+    repl = {n: (x[:pic.start] + seg + x[pic.end:]).encode("utf-8"),
+            hpf_name: _register_manifest(buf, hpf_name, item_id, entry, ext)}
+    out = add_and_patch_zip(buf, repl, {entry: data})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return {"action": "replace-image", "index": index, "section": n,
+            "new_item": item_id, "entry": entry}
+
+
+def delete_image_hwpx(src, dst, index):
+    buf, names, xmls, pics, (n, pic, br, w0, h0) = _pic_at(src, index)
+    x = xmls[n]
+    run = pic.parent if (pic.parent and pic.parent.name in ("run", "r")) else None
+    if run is not None and len(
+            [c for c in run.children
+             if c.name in ("pic", "t", "ctrl", "tbl", "chart",
+                           "equation", "rect", "ellipse", "line")]) == 1:
+        a, b = run.start, run.end          # 그림 전용 run → run째 제거
+    else:
+        a, b = pic.start, pic.end
+    _write_doc(buf, dst, {n: x[:a] + x[b:]})
+    return {"action": "delete-image", "index": index, "section": n,
+            "note": "BinData 항목은 남을 수 있음(참조 끊김, 무해)"}
+
+
+# ─── 문서 테마 (claw-hwp theme 포팅 — 한국 공문서용 정제 세트) ──────────
+#
+# 제목/머리 글자색과 표 머리행 배경색을 테마 한 단어로 일괄 적용한다.
+# in-place: 기존 .hwpx의 heading charPr(본문보다 큰 글자=제목/머리 휴리스틱)
+# textColor를 바꾸고, 각 표 row0 셀 borderFill 배경을 테마색으로(set-cell과
+# 동일 메커니즘). 글꼴 변경은 fontface 등록이 필요해 새 문서 생성 경로에서 다룬다.
+
+THEMES = {
+    "기본":   {"heading": "#000000", "table_header": "#D9D9D9"},
+    "남색":   {"heading": "#1F3864", "table_header": "#D6DCE5"},
+    "진녹":   {"heading": "#375623", "table_header": "#E2EFDA"},
+    "진회색": {"heading": "#3B3838", "table_header": "#D9D9D9"},
+}
+_THEME_ALIAS = {"default": "기본", "navy": "남색", "green": "진녹",
+                "charcoal": "진회색", "gray": "진회색", "grey": "진회색"}
+
+
+def set_theme_hwpx(src, dst, theme=None, heading_color=None,
+                   table_header_color=None):
+    """기존 문서에 테마(제목색·표머리색) in-place 적용."""
+    if theme:
+        key = _THEME_ALIAS.get(theme.lower(), theme)
+        if key not in THEMES:
+            raise ValueError("테마는 %s (또는 영문 alias) 중 하나"
+                             % "/".join(THEMES))
+        heading_color = heading_color or THEMES[key]["heading"]
+        table_header_color = table_header_color or THEMES[key]["table_header"]
+    if not heading_color and not table_header_color:
+        raise ValueError("--theme 또는 --heading-color/--table-header-color 필요")
+    buf, names, xmls, header_xml = _load_doc(src)
+    with zipfile.ZipFile(io.BytesIO(buf)) as zf:
+        header_name = next((n for n in zf.namelist()
+                            if _HEADER_XML_RE.search(n)), None)
+    if header_name is None:
+        raise ValueError("header.xml이 없습니다")
+    changed = {}
+    headings = 0
+
+    # 1) 제목/머리 charPr 색 (본문보다 큰 글자 = heading 휴리스틱)
+    if heading_color:
+        hc = _norm_hex(heading_color)
+        used = set()
+        for n in names:
+            used |= set(re.findall(r'charPrIDRef="(\d+)"', xmls[n]))
+        cps = []
+        for c in descendants(scan_xml(header_xml), "charPr"):
+            seg = header_xml[c.start:c.open_end]
+            mid = re.search(r'\bid="(\d+)"', seg)
+            mh = re.search(r'\bheight="(\d+)"', seg)
+            if mid and mh and mid.group(1) in used:
+                cps.append((c, int(mh.group(1))))
+        if cps:
+            hts = sorted(h for _, h in cps)
+            med = hts[len(hts) // 2]
+            thresh = max(med * 1.2, med + 100)   # 제목은 본문보다 1.2배+ 큼
+            splices = []
+            for c, h in cps:
+                if h >= thresh:
+                    seg = header_xml[c.start:c.open_end]
+                    new = _set_open_attr(seg, "textColor", hc)
+                    if new != seg:
+                        splices.append((c.start, c.open_end, new))
+                        headings += 1
+            if splices:
+                header_xml = apply_splices(header_xml, splices)
+
+    # 2) 표 머리행(row 0) 셀 배경
+    cells = 0
+    if table_header_color:
+        thc = _norm_hex(table_header_color)
+        for n in names:
+            xml = xmls[n]
+            splices = []
+            for tbl in descendants(scan_xml(xml), "tbl"):
+                rows = direct_children(tbl, "tr")
+                if not rows:
+                    continue
+                for tc in direct_children(rows[0], "tc"):
+                    m = re.search(r'borderFillIDRef="(\d+)"',
+                                  xml[tc.start:tc.open_end])
+                    if not m:
+                        continue
+                    inner, open_tag = _bf_by_id(header_xml, m.group(1))
+                    if inner is None:
+                        continue
+                    new_id, header_xml = _ensure_borderfill(
+                        header_xml, _set_fill_inner(inner, thc), open_tag)
+                    if new_id != m.group(1):
+                        splices.append((tc.start + m.start(), tc.start + m.end(),
+                                        'borderFillIDRef="%s"' % new_id))
+                        cells += 1
+            if splices:
+                xmls[n] = apply_splices(xml, splices)
+                changed[n] = xmls[n]
+
+    changed[header_name] = header_xml
+    _write_doc(buf, dst, changed)
+    return {"action": "theme", "theme": theme, "heading_color": heading_color,
+            "table_header_color": table_header_color,
+            "headings_recolored": headings, "header_cells_colored": cells}
+
+
 # ─── CLI ───────────────────────────────────────────────────────────
 
 def _print(obj):
@@ -4368,6 +4682,53 @@ def main():
                        help="크기 mm: 폭만 또는 '폭 높이'. 미지정 시 원본 크기")
     p_img.add_argument("--section", type=int, default=0)
 
+    p_th = sub.add_parser("set-theme",
+                          help="문서 테마(제목색·표머리색) in-place 적용")
+    p_th.add_argument("input")
+    p_th.add_argument("output")
+    p_th.add_argument("--theme", help="기본/남색/진녹/진회색 (또는 default/navy/green/charcoal)")
+    p_th.add_argument("--heading-color", dest="heading_color",
+                      help="제목/머리 글자색 RRGGBB (테마 override)")
+    p_th.add_argument("--table-header-color", dest="table_header_color",
+                      help="표 머리행 배경색 RRGGBB (테마 override)")
+
+    p_li = sub.add_parser("list-images", help="문서 내 이미지 목록(인덱스/크기)")
+    p_li.add_argument("input")
+
+    p_ri = sub.add_parser("resize-image", help="이미지 크기 변경(표시 크기)")
+    p_ri.add_argument("input")
+    p_ri.add_argument("output")
+    p_ri.add_argument("--index", type=int, required=True, help="이미지 인덱스(list-images)")
+    p_ri.add_argument("--width-mm", type=float, required=True, dest="width_mm")
+    p_ri.add_argument("--height-mm", type=float, dest="height_mm",
+                      help="생략 시 가로세로비 유지")
+
+    p_rp = sub.add_parser("replace-image", help="이미지 교체(BinData 새 항목)")
+    p_rp.add_argument("input")
+    p_rp.add_argument("output")
+    p_rp.add_argument("--index", type=int, required=True)
+    p_rp.add_argument("--image", required=True, help="새 이미지 PNG/JPG 경로")
+
+    p_di = sub.add_parser("delete-image", help="이미지 삭제")
+    p_di.add_argument("input")
+    p_di.add_argument("output")
+    p_di.add_argument("--index", type=int, required=True)
+
+    for _cmd, _h in (("insert-shape", "사각형 도형 삽입"),
+                     ("insert-textbox", "글상자 삽입")):
+        _p = sub.add_parser(_cmd, help=_h)
+        _p.add_argument("input")
+        _p.add_argument("output")
+        _p.add_argument("--after", help="기준 문구(이 문단 뒤에 삽입)")
+        _p.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막)")
+        _p.add_argument("--width-mm", type=float, dest="width_mm")
+        _p.add_argument("--height-mm", type=float, dest="height_mm")
+        _p.add_argument("--fill", default="FFFFFF", help="채움색 RRGGBB")
+        _p.add_argument("--line", default="000000", help="테두리색 RRGGBB")
+        _p.add_argument("--section", type=int, default=0)
+        if _cmd == "insert-textbox":
+            _p.add_argument("--text", required=True, help="글상자 내용")
+
     args = parser.parse_args()
 
     def _parse_para(v):
@@ -4583,6 +4944,62 @@ def main():
                 args.input, args.output, image=args.image, anchor=args.anchor,
                 size_mm=args.size_mm, dx_mm=args.dx_mm, dy_mm=args.dy_mm,
                 occurrence=args.occurrence, overlap=args.overlap)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "set-theme":
+            info = set_theme_hwpx(
+                args.input, args.output, theme=args.theme,
+                heading_color=args.heading_color,
+                table_header_color=args.table_header_color)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "list-images":
+            _print({"input": args.input, **list_images_hwpx(args.input),
+                    "ok": True})
+            return 0
+
+        if args.command == "resize-image":
+            info = resize_image_hwpx(args.input, args.output, args.index,
+                                     args.width_mm, args.height_mm)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "replace-image":
+            info = replace_image_hwpx(args.input, args.output, args.index,
+                                      args.image)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "delete-image":
+            info = delete_image_hwpx(args.input, args.output, args.index)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "insert-shape":
+            info = insert_shape_hwpx(
+                args.input, args.output, after=args.after,
+                para=_parse_para(args.para),
+                width_mm=args.width_mm if args.width_mm is not None else 50.0,
+                height_mm=args.height_mm if args.height_mm is not None else 20.0,
+                fill=args.fill, line=args.line, section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "insert-textbox":
+            info = insert_textbox_hwpx(
+                args.input, args.output, args.text, after=args.after,
+                para=_parse_para(args.para),
+                width_mm=args.width_mm if args.width_mm is not None else 60.0,
+                height_mm=args.height_mm if args.height_mm is not None else 25.0,
+                fill=args.fill, line=args.line, section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0

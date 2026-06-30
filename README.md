@@ -136,6 +136,12 @@ python3 scripts/fill_hwpx.py set-columns doc.hwpx out.hwpx --count 2 --gap-mm 8
 python3 scripts/fill_hwpx.py set-bullet-list doc.hwpx out.hwpx --para 3 --to 6
 python3 scripts/fill_hwpx.py insert-chart doc.hwpx out.hwpx --type col --cat cat.json --series series.json
 
+# 문서 테마(제목색·표머리색 일괄) / 도형·글상자 / 이미지 편집
+python3 scripts/fill_hwpx.py set-theme doc.hwpx out.hwpx --theme 남색
+python3 scripts/fill_hwpx.py insert-textbox doc.hwpx out.hwpx --after "여기" --text "참고" --fill FFF2CC
+python3 scripts/fill_hwpx.py list-images doc.hwpx
+python3 scripts/fill_hwpx.py resize-image doc.hwpx out.hwpx --index 0 --width-mm 30
+
 # 개인정보(PII) 비경유 양식 채우기 — 값이 stdout/로그/모델 컨텍스트를 안 거침
 python3 scripts/secure_fill.py fill form.hwpx out.hwpx --profile profile.json --shred-profile
 
