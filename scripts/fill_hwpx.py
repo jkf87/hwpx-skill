@@ -4049,6 +4049,115 @@ def set_list_hwpx(src, dst, list_type, after=None, para=None, to_para=None,
             "style": style if list_type == "number" else None}
 
 
+# ─── 도형/글상자 (P11: 사각형 + 글상자, claw insert_shape/textbox 포팅) ──
+#
+# floating <hp:rect>를 대상 문단(--after/--para) 뒤 새 문단에 삽입. 글상자는
+# 같은 rect에 <hp:drawText>(텍스트 한 문단)를 얹은 것. 채움/테두리 색 지정.
+# claw buildShape의 rect 봉투/속성을 그대로 따른다(순수 stdlib).
+
+_MATRIX3 = ('<hp:renderingInfo>'
+            '<hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+            '<hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+            '<hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/>'
+            '</hp:renderingInfo>')
+
+
+def _rect_xml(xml, w, h, fill, line, text=None, dx=0, dy=0, margin=0,
+              line_w=33):
+    """floating <hp:rect> (text 있으면 글상자). w/h/dx/dy/margin=HWPUNIT."""
+    rid, inst = _fresh_ids(xml, 2)
+    wrap = "SQUARE" if text is not None else "IN_FRONT_OF_TEXT"
+    draw = ""
+    if text is not None:
+        pid = _fresh_ids(xml, 1)[0]
+        draw = (
+            '<hp:drawText lastWidth="4294967295" name="" editable="0">'
+            '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" '
+            'vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" '
+            'textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+            '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+            'columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>%s'
+            '</hp:t></hp:run></hp:p></hp:subList></hp:drawText>'
+            % (pid, escape_text(text)))
+    return (
+        '<hp:rect id="%d" zOrder="0" numberingType="PICTURE" textWrap="%s" '
+        'textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" '
+        'groupLevel="0" instid="%d" ratio="0">'
+        '<hp:offset x="0" y="0"/><hp:orgSz width="%d" height="%d"/>'
+        '<hp:curSz width="0" height="0"/>'
+        '<hp:flip horizontal="0" vertical="0"/>'
+        '<hp:rotationInfo angle="0" centerX="0" centerY="0" rotateimage="1"/>'
+        '%s'
+        '<hp:lineShape color="%s" width="%d" style="SOLID" endCap="FLAT" '
+        'headStyle="NORMAL" tailStyle="NORMAL" headfill="1" tailfill="1" '
+        'headSz="SMALL_SMALL" tailSz="SMALL_SMALL" outlineStyle="NORMAL" '
+        'alpha="0"/>'
+        '<hc:fillBrush><hc:winBrush faceColor="%s" hatchColor="#000000" '
+        'alpha="0"/></hc:fillBrush>'
+        '<hp:shadow type="NONE" color="#B2B2B2" offsetX="0" offsetY="0" '
+        'alpha="0"/>%s'
+        '<hc:pt0 x="0" y="0"/><hc:pt1 x="%d" y="0"/><hc:pt2 x="%d" y="%d"/>'
+        '<hc:pt3 x="0" y="%d"/>'
+        '<hp:sz width="%d" widthRelTo="ABSOLUTE" height="%d" '
+        'heightRelTo="ABSOLUTE" protect="0"/>'
+        '<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="0" '
+        'allowOverlap="1" holdAnchorAndSO="0" vertRelTo="PARA" '
+        'horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="%d" '
+        'horzOffset="%d"/>'
+        '<hp:outMargin left="%d" right="%d" top="%d" bottom="%d"/>'
+        '<hp:shapeComment>%s</hp:shapeComment></hp:rect>'
+        % (rid, wrap, inst, w, h, _MATRIX3, line, line_w, fill, draw,
+           w, w, h, h, w, h, dy, dx, margin, margin, margin, margin,
+           "글상자" if text is not None else "사각형"))
+
+
+def _insert_floating_para(src, dst, after, para, section_idx, build_inner):
+    """대상 문단 뒤에 floating 개체를 담은 새 문단을 삽입(공통)."""
+    buf, names, xmls, _ = _load_doc(src)
+    sec_name, sec_xml, para_el = _resolve_target_para(
+        names, xmls, after, para, section_idx)
+    m = re.search(r'charPrIDRef="(\d+)"', sec_xml[para_el.start:para_el.end])
+    char_id = m.group(1) if m else "0"
+    inner = build_inner(sec_xml)
+    new_para = (
+        '<hp:p id="%d" paraPrIDRef="0" styleIDRef="0" pageBreak="0" '
+        'columnBreak="0" merged="0"><hp:run charPrIDRef="%s">%s</hp:run></hp:p>'
+        % (_fresh_para_id(sec_xml), char_id, inner))
+    new_xml = apply_splices(sec_xml, [(para_el.end, para_el.end, new_para)])
+    _write_doc(buf, dst, {sec_name: new_xml})
+    return sec_name
+
+
+def insert_shape_hwpx(src, dst, after=None, para=None, shape="rect",
+                      width_mm=50.0, height_mm=20.0, fill="FFFFFF",
+                      line="000000", section_idx=0):
+    if shape != "rect":
+        raise ValueError("현재 shape는 rect만 지원합니다")
+    w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
+    h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    fc, lc = _norm_hex(fill), _norm_hex(line)
+    sec = _insert_floating_para(
+        src, dst, after, para, section_idx,
+        lambda x: _rect_xml(x, w, h, fc, lc))
+    return {"action": "insert-shape", "shape": shape, "section": sec,
+            "fill": fc, "line": lc}
+
+
+def insert_textbox_hwpx(src, dst, text, after=None, para=None,
+                        width_mm=60.0, height_mm=25.0, fill="FFFFFF",
+                        line="000000", section_idx=0):
+    if text is None:
+        raise ValueError("--text(글상자 내용)가 필요합니다")
+    w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
+    h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    fc, lc = _norm_hex(fill), _norm_hex(line)
+    sec = _insert_floating_para(
+        src, dst, after, para, section_idx,
+        lambda x: _rect_xml(x, w, h, fc, lc, text=str(text), margin=567))
+    return {"action": "insert-textbox", "section": sec, "text": text,
+            "fill": fc, "line": lc}
+
+
 # ─── 이미지 편집 (P13: 기존 그림 목록/리사이즈/교체/삭제) ──────────────
 #
 # 문서 순서 hp:pic을 인덱스로 지정해 편집한다. resize는 표시 크기(hp:sz/curSz)만
@@ -4605,6 +4714,21 @@ def main():
     p_di.add_argument("output")
     p_di.add_argument("--index", type=int, required=True)
 
+    for _cmd, _h in (("insert-shape", "사각형 도형 삽입"),
+                     ("insert-textbox", "글상자 삽입")):
+        _p = sub.add_parser(_cmd, help=_h)
+        _p.add_argument("input")
+        _p.add_argument("output")
+        _p.add_argument("--after", help="기준 문구(이 문단 뒤에 삽입)")
+        _p.add_argument("--para", help="문단 인덱스(0-base, last/-1=마지막)")
+        _p.add_argument("--width-mm", type=float, dest="width_mm")
+        _p.add_argument("--height-mm", type=float, dest="height_mm")
+        _p.add_argument("--fill", default="FFFFFF", help="채움색 RRGGBB")
+        _p.add_argument("--line", default="000000", help="테두리색 RRGGBB")
+        _p.add_argument("--section", type=int, default=0)
+        if _cmd == "insert-textbox":
+            _p.add_argument("--text", required=True, help="글상자 내용")
+
     args = parser.parse_args()
 
     def _parse_para(v):
@@ -4854,6 +4978,28 @@ def main():
 
         if args.command == "delete-image":
             info = delete_image_hwpx(args.input, args.output, args.index)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "insert-shape":
+            info = insert_shape_hwpx(
+                args.input, args.output, after=args.after,
+                para=_parse_para(args.para),
+                width_mm=args.width_mm if args.width_mm is not None else 50.0,
+                height_mm=args.height_mm if args.height_mm is not None else 20.0,
+                fill=args.fill, line=args.line, section_idx=args.section)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "insert-textbox":
+            info = insert_textbox_hwpx(
+                args.input, args.output, args.text, after=args.after,
+                para=_parse_para(args.para),
+                width_mm=args.width_mm if args.width_mm is not None else 60.0,
+                height_mm=args.height_mm if args.height_mm is not None else 25.0,
+                fill=args.fill, line=args.line, section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
