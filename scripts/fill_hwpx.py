@@ -4049,6 +4049,109 @@ def set_list_hwpx(src, dst, list_type, after=None, para=None, to_para=None,
             "style": style if list_type == "number" else None}
 
 
+# ─── 이미지 편집 (P13: 기존 그림 목록/리사이즈/교체/삭제) ──────────────
+#
+# 문서 순서 hp:pic을 인덱스로 지정해 편집한다. resize는 표시 크기(hp:sz/curSz)만
+# 바꿔 모든 포맷 pic에 안전(원본 geometry 보존). replace는 새 이미지를 BinData에
+# 넣고 binaryItemIDRef를 repoint(표시 박스 유지). delete는 pic(전용 run이면 run째)
+# 제거. 변경 엔트리만 재기록(원본 보존). 인덱스는 list-images로 확인.
+
+
+def _list_pics(names, xmls):
+    """문서 순서 hp:pic 목록: [(section, el, binref, w_hu, h_hu)]."""
+    out = []
+    for n in names:
+        x = xmls[n]
+        for pic in descendants(scan_xml(x), "pic"):
+            seg = x[pic.start:pic.end]
+            br = re.search(r'binaryItemIDRef="([^"]+)"', seg)
+            sz = re.search(r'<hp:sz width="(\d+)"[^>]*?\bheight="(\d+)"', seg)
+            out.append((n, pic, br.group(1) if br else None,
+                        int(sz.group(1)) if sz else 0,
+                        int(sz.group(2)) if sz else 0))
+    return out
+
+
+def _pic_at(src, index):
+    """(buf, names, xmls, pics, target) — index 검증 포함."""
+    buf, names, xmls, _ = _load_doc(src)
+    pics = _list_pics(names, xmls)
+    if not pics:
+        raise ValueError("문서에 이미지(hp:pic)가 없습니다")
+    if index < 0 or index >= len(pics):
+        raise ValueError("이미지 인덱스 초과: %d (이미지 %d개, 0..%d)"
+                         % (index, len(pics), len(pics) - 1))
+    return buf, names, xmls, pics, pics[index]
+
+
+def list_images_hwpx(src):
+    buf, names, xmls, _ = _load_doc(src)
+    pics = _list_pics(names, xmls)
+    items = []
+    for i, (n, pic, br, w, h) in enumerate(pics):
+        items.append({"index": i, "section": n, "binaryItemIDRef": br,
+                      "width_mm": round(w / HWPUNIT_PER_MM, 1),
+                      "height_mm": round(h / HWPUNIT_PER_MM, 1)})
+    return {"count": len(items), "images": items}
+
+
+def resize_image_hwpx(src, dst, index, width_mm, height_mm=None):
+    buf, names, xmls, pics, (n, pic, br, w0, h0) = _pic_at(src, index)
+    w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
+    if height_mm:
+        h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    elif w0:
+        h = max(1, int(round(h0 * (w / w0))))      # 가로세로비 유지
+    else:
+        h = w
+    x = xmls[n]
+    seg = x[pic.start:pic.end]
+    seg = re.sub(r'(<hp:sz width=")\d+("[^>]*?\bheight=")\d+(")',
+                 lambda m: m.group(1) + str(w) + m.group(2) + str(h) + m.group(3),
+                 seg, count=1)
+    seg = re.sub(r'(<hp:curSz width=")\d+(" height=")\d+(")',
+                 lambda m: m.group(1) + str(w) + m.group(2) + str(h) + m.group(3),
+                 seg, count=1)
+    _write_doc(buf, dst, {n: x[:pic.start] + seg + x[pic.end:]})
+    return {"action": "resize-image", "index": index, "section": n,
+            "width_mm": round(w / HWPUNIT_PER_MM, 1),
+            "height_mm": round(h / HWPUNIT_PER_MM, 1)}
+
+
+def replace_image_hwpx(src, dst, index, image):
+    buf, names, xmls, pics, (n, pic, br, w0, h0) = _pic_at(src, index)
+    hpf_name = _find_hpf_name(buf)
+    if not hpf_name:
+        raise ValueError("content.hpf를 찾을 수 없습니다")
+    item_id, entry, ext, data, aspect, nat_w, nat_h = _embed_image(buf, image)
+    x = xmls[n]
+    seg = re.sub(r'binaryItemIDRef="[^"]+"',
+                 'binaryItemIDRef="%s"' % item_id, x[pic.start:pic.end], count=1)
+    repl = {n: (x[:pic.start] + seg + x[pic.end:]).encode("utf-8"),
+            hpf_name: _register_manifest(buf, hpf_name, item_id, entry, ext)}
+    out = add_and_patch_zip(buf, repl, {entry: data})
+    with open(dst, "wb") as f:
+        f.write(out)
+    return {"action": "replace-image", "index": index, "section": n,
+            "new_item": item_id, "entry": entry}
+
+
+def delete_image_hwpx(src, dst, index):
+    buf, names, xmls, pics, (n, pic, br, w0, h0) = _pic_at(src, index)
+    x = xmls[n]
+    run = pic.parent if (pic.parent and pic.parent.name in ("run", "r")) else None
+    if run is not None and len(
+            [c for c in run.children
+             if c.name in ("pic", "t", "ctrl", "tbl", "chart",
+                           "equation", "rect", "ellipse", "line")]) == 1:
+        a, b = run.start, run.end          # 그림 전용 run → run째 제거
+    else:
+        a, b = pic.start, pic.end
+    _write_doc(buf, dst, {n: x[:a] + x[b:]})
+    return {"action": "delete-image", "index": index, "section": n,
+            "note": "BinData 항목은 남을 수 있음(참조 끊김, 무해)"}
+
+
 # ─── 문서 테마 (claw-hwp theme 포팅 — 한국 공문서용 정제 세트) ──────────
 #
 # 제목/머리 글자색과 표 머리행 배경색을 테마 한 단어로 일괄 적용한다.
@@ -4480,6 +4583,28 @@ def main():
     p_th.add_argument("--table-header-color", dest="table_header_color",
                       help="표 머리행 배경색 RRGGBB (테마 override)")
 
+    p_li = sub.add_parser("list-images", help="문서 내 이미지 목록(인덱스/크기)")
+    p_li.add_argument("input")
+
+    p_ri = sub.add_parser("resize-image", help="이미지 크기 변경(표시 크기)")
+    p_ri.add_argument("input")
+    p_ri.add_argument("output")
+    p_ri.add_argument("--index", type=int, required=True, help="이미지 인덱스(list-images)")
+    p_ri.add_argument("--width-mm", type=float, required=True, dest="width_mm")
+    p_ri.add_argument("--height-mm", type=float, dest="height_mm",
+                      help="생략 시 가로세로비 유지")
+
+    p_rp = sub.add_parser("replace-image", help="이미지 교체(BinData 새 항목)")
+    p_rp.add_argument("input")
+    p_rp.add_argument("output")
+    p_rp.add_argument("--index", type=int, required=True)
+    p_rp.add_argument("--image", required=True, help="새 이미지 PNG/JPG 경로")
+
+    p_di = sub.add_parser("delete-image", help="이미지 삭제")
+    p_di.add_argument("input")
+    p_di.add_argument("output")
+    p_di.add_argument("--index", type=int, required=True)
+
     args = parser.parse_args()
 
     def _parse_para(v):
@@ -4704,6 +4829,31 @@ def main():
                 args.input, args.output, theme=args.theme,
                 heading_color=args.heading_color,
                 table_header_color=args.table_header_color)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "list-images":
+            _print({"input": args.input, **list_images_hwpx(args.input),
+                    "ok": True})
+            return 0
+
+        if args.command == "resize-image":
+            info = resize_image_hwpx(args.input, args.output, args.index,
+                                     args.width_mm, args.height_mm)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "replace-image":
+            info = replace_image_hwpx(args.input, args.output, args.index,
+                                      args.image)
+            _print({"input": args.input, "output": args.output,
+                    **info, "ok": True})
+            return 0
+
+        if args.command == "delete-image":
+            info = delete_image_hwpx(args.input, args.output, args.index)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
