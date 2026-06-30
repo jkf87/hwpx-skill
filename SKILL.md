@@ -624,6 +624,42 @@ echo '[{"name":"매출","values":[10,20,15]}]' > series.json
 python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-chart doc.hwpx out.hwpx --type col --cat cat.json --series series.json --after "차트 위치"
 ```
 
+### 문서 테마: `set-theme` (+ md2hwpx `--theme`)
+
+제목/머리 글자색과 표 머리행 배경색을 테마 한 단어로 일괄 적용(원본 보존).
+한국 공문서용 정제 세트 **기본·남색·진녹·진회색**(영문 default/navy/green/charcoal).
+
+```bash
+# 기존 문서 in-place (제목 charPr 색 + 표 머리행 배경색)
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-theme doc.hwpx out.hwpx --theme 남색
+# 색 직접 지정(테마 override)
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" set-theme doc.hwpx out.hwpx --heading-color 1F3864 --table-header-color D6DCE5
+# 새 문서 생성 시 테마
+python3 "${CLAUDE_SKILL_DIR}/scripts/md2hwpx.py" in.md -o out.hwpx --theme 남색
+```
+
+- 제목/머리 판별은 **본문보다 큰 글자(charPr height)** 휴리스틱. 글꼴 변경은 fontface 등록이 필요해 새 문서 생성 경로에서만(in-place는 색).
+
+### 도형/글상자: `insert-shape` / `insert-textbox`
+
+대상 문단(`--after`/`--para`) 뒤에 사각형·글상자를 floating으로 삽입.
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-textbox doc.hwpx out.hwpx --after "여기" --text "참고 메모" --fill FFF2CC --line BF9000
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-shape doc.hwpx out.hwpx --para last --width-mm 40 --height-mm 15 --fill DDEBF7
+```
+
+### 이미지 편집: `list-images` / `resize-image` / `replace-image` / `delete-image`
+
+문서 내 그림을 인덱스로 편집. 먼저 `list-images`로 인덱스 확인.
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" list-images doc.hwpx
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" resize-image doc.hwpx out.hwpx --index 0 --width-mm 30   # 높이 생략=비율 유지
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" replace-image doc.hwpx out.hwpx --index 0 --image new.png
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" delete-image doc.hwpx out.hwpx --index 0
+```
+
 ### 좌표 지정 폴백: `fill --cells`
 
 라벨 휴리스틱이 안 통하는 복잡한 표는 `analyze`가 보고한 좌표로 직접 채운다.
@@ -691,6 +727,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | 페이지 설정·다단·쪽/단 나누기 | **J `set-page`/`set-columns`/`page-break`/`column-break`** |
 | 글머리표·번호목록 전환 | **J `set-bullet-list`/`set-number-list`/`clear-list`** (데스크톱 기준) |
 | 차트 삽입(막대/선/원 등) | **J `insert-chart`** |
+| 문서 테마(제목색·표머리색 일괄) | **J `set-theme`** / md2hwpx `--theme` |
+| 도형·글상자 삽입 | **J `insert-shape`/`insert-textbox`** |
+| 기존 이미지 크기변경·교체·삭제 | **J `list-images`/`resize-image`/`replace-image`/`delete-image`** |
 | 개인정보(주민번호·계좌) 양식 채우기 | **`secure_fill.py`** (PII 비경유) |
 | 라벨 매칭 실패한 복잡한 표 | **J `fill --cells`** (좌표 지정) |
 | XML 전역 일괄 치환 (메타데이터 포함) | F (clone_form.py) |
