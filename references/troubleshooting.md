@@ -89,7 +89,7 @@ python3 scripts/fill_hwpx.py check output.hwpx --strict
 
 | 원인 | 해결 |
 |------|------|
-| charPr의 borderFillIDRef가 테두리(SOLID) borderFill을 참조 | `convert_hwp.py`는 변환 직후 자동 제거(기본 동작) |
+| charPr의 borderFillIDRef가 테두리(SOLID) borderFill을 참조 | `fill_hwpx.py check --strict`가 결과 전달을 차단 |
 | 이미 변환된 .hwpx에 테두리가 남음 | `python3 scripts/fill_hwpx.py fix-borders 파일.hwpx` |
 | 표 셀 테두리까지 사라질까 걱정 | tc(표 셀)의 borderFillIDRef는 section에 있어 보존됨 |
 
@@ -102,9 +102,9 @@ python3 scripts/fill_hwpx.py fix-borders 변환본.hwpx out.hwpx     # 새 파�
 python3 scripts/fill_hwpx.py check 파일.hwpx --strict
 ```
 
-> **convert_hwp.py를 거치지 않은 경로 주의**: 이미 변환된 hwpx(또는 한컴 저장본)를
-> 베이스로 replace/clone만 하면 변환 시점의 자동 보정이 안 걸려 글자 테두리가
-> 남는다. `hwpx_guard_hook.py`를 PreToolUse 훅으로 걸면 파일을 사용자에게 전달
+> **변환 경로와 무관하게 주의**: 이미 변환된 hwpx(또는 한컴 저장본)를
+> 베이스로 replace/clone하면 기존 글자 테두리가 남을 수 있다.
+> `hwpx_guard_hook.py`를 PreToolUse 훅으로 걸면 파일을 사용자에게 전달
 > (open/cp)하기 직전 **글자 테두리를 자동 제거**하므로 어떤 경로든 안전하다.
 
 ## "python-hwpx 에러"

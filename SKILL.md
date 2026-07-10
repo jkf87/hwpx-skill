@@ -1,6 +1,6 @@
 ---
 name: hwpx
-description: "HWP/HWPX 문서(.hwp, .hwpx) 생성·변환·읽기·편집 통합 스킬. 'HWP 변환', 'hwp를 hwpx로', '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서' 등의 키워드 시 반드시 사용. HWP→HWPX 변환, 마크다운·텍스트·URL→HWPX 변환, 템플릿 치환 워크플로우를 지원한다."
+description: "HWPX 문서(.hwpx) 생성·읽기·편집과 명시적 HWP→HWPX 변환 스킬. 'HWP 변환', 'hwp를 hwpx로', '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서' 등의 키워드 시 반드시 사용. 이 스킬은 HWP 바이너리 직접 읽기·편집은 지원하지 않으며, HWP→HWPX 변환은 사용자가 명시한 경우에만 수행한다."
 allowed-tools: Bash(python3 *), Read, Write, Glob, Grep
 ---
 
@@ -63,8 +63,8 @@ ${CLAUDE_SKILL_DIR}/
 
 ```bash
 pip install python-hwpx lxml --break-system-packages
-# HWP→HWPX 변환 (Workflow H) 추가 의존성:
-pip install pyhwp5 olefile --break-system-packages
+# HWP→HWPX 변환 (Workflow H): Node.js 18+
+# rhwp WASM 런타임은 scripts/vendor/rhwp에 고정·포함되어 별도 설치 없음
 ```
 
 ## Mandatory Finalization And QA
@@ -121,20 +121,23 @@ Rules:
  └─ "HWPX 읽어줘" → 워크플로우 E (읽기/추출)
 ```
 
-### ⚠️ 자동 판별 규칙 (사용자가 .hwp 파일을 제공한 경우)
+### ⚠️ 원본 형식 보존 규칙 (사용자가 .hwp 파일을 제공한 경우)
 
-> **사용자가 `.hwp` 파일을 주면 먼저 워크플로우 H로 HWPX 변환 후 후속 워크플로우를 진행한다.**
+> **`.hwp`를 받았다는 이유만으로 자동 변환하지 않는다. 사용자가 `.hwpx` 변환을
+> 명시한 경우에만 워크플로우 H를 실행하고, 그 외에는 원본 형식을 보존한다.**
 
 ```
 입력 파일 확인
- ├─ .hwp 파일 → 워크플로우 H로 HWPX 변환
- │   ├─ "변환만 해줘" → 변환 후 종료
- │   ├─ "빈칸/필드 채워줘" → 변환 후 워크플로우 J
- │   ├─ "내용 바꿔줘" → 변환 후 워크플로우 F
- │   ├─ "읽어줘/텍스트 추출" → 변환 후 워크플로우 E
- │   └─ "수정해줘" → 변환 후 워크플로우 C
+ ├─ .hwp 파일
+ │   ├─ "HWPX로 변환해줘" → 워크플로우 H (원본 유지, 별도 .hwpx 출력)
+ │   ├─ "읽어줘/텍스트 추출" → 이 스킬의 HWP 직접 읽기 미지원 안내; 자동 변환 금지
+ │   └─ "수정해줘/채워줘" → 이 스킬의 HWP 직접 편집 미지원 안내; 자동 변환 금지
  └─ .hwpx 파일 → 기존 워크플로우 판별 (아래)
 ```
+
+HWP 읽기·편집을 계속하려면 원본 형식을 다루는 별도 도구가 필요하다. 이 스킬만
+사용 가능한 환경에서는 원본을 보존한 채 별도 HWPX 산출물로 변환할지 사용자의
+명시적 선택을 받아야 하며, 변환하지 않은 작업을 완료했다고 보고하지 않는다.
 
 ### ⚠️ 자동 판별 규칙 (사용자가 양식 파일을 제공한 경우)
 
@@ -688,7 +691,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | **손상된 문서 대화상자** | `errors`: secPr에 pagePr/margin 누락·pageWidth 등 비표준 속성 | 정상 HWPX의 `<hp:secPr>...</hp:secPr>`을 이식. 애초에 정상 파일을 베이스로 작업 |
 | **빈 페이지로 열림** | `raw_llm_suspect: true`: 미리보기·줄배치 부재(한컴 미경유) | 정상 HWPX(한컴 저장본/워크플로우 H 변환본)를 베이스로 fill/replace. 또는 한컴에서 한 번 열어 저장 |
 | **모든 글자에 네모 테두리** | `char_border_bug: true`: charPr 다수가 SOLID 테두리 borderFill 참조 | `fill_hwpx.py fix-borders output.hwpx` 실행 후 재check |
-| **글자가 세로로 뒤집힘** | `vertical_misconvert: true`: 셀 textDirection이 대부분 VERTICAL (hwp2hwpx 오변환) | `convert_hwp.py`로 재변환(자동 보정 포함). 이미 변환된 파일은 textDirection VERTICAL→HORIZONTAL 교정 |
+| **글자가 세로로 뒤집힘** | `vertical_misconvert: true`: 셀 textDirection이 대부분 VERTICAL | 의도한 세로쓰기인지 원본과 비교한 뒤, 오변환일 때만 textDirection VERTICAL→HORIZONTAL 교정 |
 
 > ⚠️ **이 게이트를 건너뛰면 안 된다.** 과거 사고가 전부 여기서 잡혔어야 했다:
 > 가짜 secPr(손상 문서), raw 파일(빈 페이지), 글자 테두리 — 셋 다 `check --strict`가
@@ -736,7 +739,8 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | `{{이름}}` 같은 플레이스홀더가 박힌 전용 템플릿 | B |
 
 > J가 타겟을 못 찾으면(`analyze`의 target_count가 0) `replace`(문구 교체)나
-> F로 전환한다. **.hwp 입력은 워크플로우 H로 HWPX 변환 후 J를 적용한다.**
+> F로 전환한다. **.hwp 입력은 자동 변환하지 않는다. 원본 HWP 직접 편집이 불가능하고
+> 사용자가 별도 HWPX 산출물을 요구한 경우에만 워크플로우 H 후 J를 적용한다.**
 
 ---
 
@@ -1028,29 +1032,27 @@ echo "2025.1.6 오후 3시 회의" | python3 scripts/gonmun_lint.py   # 표준�
 
 ## 워크플로우 H: HWP → HWPX 변환 ★★
 
-> **HWP(바이너리) 파일을 HWPX(개방형 XML)로 변환. 이미지·도형·표 포함 문서 지원.**
+> **HWP(바이너리)를 HWPX(개방형 XML)로 명시적으로 변환하는 손실 가능 워크플로우.**
 >
-> 변환 후 다른 워크플로우(E/C/F)와 조합 가능.
+> 원본 형식 유지가 기본이다. HWPX가 반드시 필요한 경우에만 별도 파일로 변환한다.
 
 ### 트리거 조건
 
-- 사용자가 `.hwp` 파일 경로를 제공
-- "HWP를 HWPX로 변환", "한글 파일 변환", "hwp 파일 열어줘" 등
+- 사용자가 `.hwp` 파일 경로와 함께 `.hwpx` 변환을 명시
+- "HWP를 HWPX로 변환", "hwp를 hwpx로" 등
 
 ### 전체 흐름
 
 ```
 [1] .hwp 파일 확인
-[2] convert_hwp.py로 변환 → .hwpx 생성 (글자 테두리 버그 자동 보정)
-[3] validate.py 검증
-[4] (선택) 후속 워크플로우 진행 (E/C/F/J)
+[2] convert_hwp.py로 원본과 다른 경로에 .hwpx 생성
+[3] 이미지·미리보기 보정 + 원본 용지/여백·줄배치 보존 + 표 앞 공백 run 정리
+[4] validate.py + fill_hwpx.py check --strict 검증
+[5] 원본과 결과를 함께 보관하고 중요 문서는 한컴에서 시각 점검
 ```
 
-> ⚠️ **변환기 버그 자동 보정**: hwp2hwpx 변환기는 글자모양(charPr)마다 테두리
-> borderFill을 참조시켜 **문서의 모든 글자에 네모 테두리**가 생기는 버그가 있다.
-> `convert_hwp.py`는 변환 직후 이를 자동 제거한다(표 셀 테두리는 보존).
-> 이미 변환된 파일은 `fill_hwpx.py fix-borders 파일.hwpx`로 보정한다.
-> 변환 결과를 그대로 두려면 `--keep-char-borders`.
+> ⚠️ **호환성 주의**: 포맷 변환은 표 음영, 복잡한 도형, 간격과 쪽 나눔을
+> 바꿀 수 있다. 구조 검증 통과가 한컴에서의 시각 동일성을 보장하지 않는다.
 
 ### CLI 사용법
 
@@ -1066,6 +1068,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --info
 
 # JSON 출력
 python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --info --json
+
+# 이전 CLI 호환용(현재 rhwp 경로에서는 no-op)
+python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --keep-char-borders
 ```
 
 ### Python API
@@ -1081,7 +1086,8 @@ output_path = convert("input.hwp", "output.hwpx")
 
 # 정보 확인
 metadata = info("input.hwp")
-print(metadata["title"], metadata["section_count"])
+print(metadata["version"], metadata["section_count"])
+# title/author/subject/keywords는 현재 rhwp API가 제공하지 않아 None
 ```
 
 ### 변환 후 후속 작업 예시
@@ -1090,8 +1096,9 @@ print(metadata["title"], metadata["section_count"])
 # HWP → HWPX 변환
 python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" doc.hwp -o doc.hwpx
 
-# 검증
+# 검증(변환기 내부에서도 동일 게이트 실행)
 python3 "${CLAUDE_SKILL_DIR}/scripts/validate.py" doc.hwpx
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check doc.hwpx --strict
 
 # 텍스트 추출 (Workflow E)
 python3 "${CLAUDE_SKILL_DIR}/scripts/text_extract.py" doc.hwpx
@@ -1101,29 +1108,28 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/clone_form.py" doc.hwpx output.hwpx --map m
 python3 "${CLAUDE_SKILL_DIR}/scripts/fix_namespaces.py" output.hwpx
 ```
 
-### 의존성
+### 변환 엔진과 의존성
 
-```bash
-pip install pyhwp5 olefile lxml --break-system-packages
-```
+- Node.js 18+
+- `@rhwp/core` 0.7.10 WASM 런타임을 `scripts/vendor/rhwp`에 고정·포함
+- 실행 중 패키지 설치나 Git clone 없음
+- 이미지 `isEmbeded`, 0 크기와 미리보기 보정
+- 원본의 섹션별 용지·여백과 유효한 `linesegarray`를 보존하고, 표를 중복
+  배치시키는 whitespace-only `<hp:t>`만 제거
+- 임시 HWPX를 `validate.py`와 `check --strict`로 검사한 뒤 결과 경로에 원자적으로 교체
 
-> `convert_hwp.py`는 누락된 패키지를 자동으로 설치하며,
-> `hwp2hwpx-python-refactor` 레포가 없으면 자동으로 클론한다.
+> 원본 `.hwp`는 변경하지 않는다. HWP와 HWPX 표현 차이로 일부 고급 개체가
+> 달라질 수 있으므로 변환 후 원본과 결과를 함께 보관한다.
 
 ### 지원 범위
 
 | 항목 | 지원 |
 |------|------|
-| 텍스트 | ✅ |
-| 표 | ✅ |
-| 이미지 (PNG/JPG/BMP/GIF) | ✅ |
-| 도형 (사각형/원/선) | ✅ |
-| 컨테이너 (그룹 도형) | ✅ |
-| 각주/미주 | ✅ |
-| 다단 | ✅ |
-| 머리말/꼬리말 | ✅ |
-| OLE 객체 | ⚠️ 부분 지원 |
-| 수식 | ✅ `add-equation` (hp:equation, 문법 references/equation-syntax.md) |
+| 텍스트·표 | 구조 보존 회귀 테스트 |
+| 이미지 (PNG/JPG/BMP/GIF) | embedded 매니페스트·원본 크기 보정, 시각 점검 필요 |
+| 도형·컨테이너 | best effort, 시각 점검 필요 |
+| 각주/미주·다단·머리말/꼬리말 | best effort, 시각 점검 필요 |
+| OLE 객체·수식 | 구조가 남아도 렌더링 보장 안 됨 |
 
 ---
 
@@ -1161,7 +1167,7 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 ## Critical Rules
 
 0. **★★★ 배포 전 필수 게이트 (최우선)**: .hwpx를 사용자에게 전달(open·복사·"완성" 보고)하기 직전 **반드시** `fill_hwpx.py check output.hwpx --strict`를 실행하고 **exit 0일 때만 전달**한다. exit 2면 secPr 이식 / 정상 베이스로 재작업 / `fix-borders` 중 해당 수정 후 재check. 변환·생성·편집 어느 경로든 예외 없음. (과거 사고 3종 — 손상 문서·빈 페이지·글자 테두리 — 전부 이 한 줄로 잡힌다)
-1. **HWP+HWPX 지원**: `.hwp`(바이너리)는 워크플로우 H로 HWPX 변환 후 처리
+1. **원본 형식 우선**: `.hwp`는 자동 변환하지 않는다. 사용자가 별도 `.hwpx` 산출물을 명시한 경우에만 워크플로우 H 사용
 2. **secPr 필수**: 첫 문단 첫 run에 secPr + colPr
 3. **mimetype**: 첫 ZIP 엔트리, ZIP_STORED
 4. **네임스페이스**: `hp:`, `hs:`, `hh:`, `hc:` 접두사 유지
@@ -1179,7 +1185,7 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 16. **Remove line caches after edits**: run `finalize_hwpx.py --strip-linesegarray` after XML/text replacement.
 17. **Check strict table layout**: run `finalize_hwpx.py --layout` and fix long single-paragraph cells by splitting paragraphs and increasing row heights.
 18. **Real openability check**: on Windows with Hancom installed, run `validate.py --hancom`; ZIP/XML validation alone is not enough.
-19. **변환 후 글자 테두리 보정**: `.hwp` 변환 시 `convert_hwp.py`가 글자 테두리 버그를 자동 제거. 이미 변환된 파일은 `fill_hwpx.py fix-borders`로 보정
+19. **변환 이상 탐지**: `check --strict`가 글자 테두리·세로쓰기 우세를 차단한다. 원본과 비교해 실제 오변환일 때만 `fix-borders`나 textDirection 교정을 적용
 20. **배포 전 열림 점검**: 사용자에게 파일을 주기 전 `fill_hwpx.py check --strict`로 secPr 불완전(손상 문서)·raw 파일(빈 페이지)을 확인
 
 ---

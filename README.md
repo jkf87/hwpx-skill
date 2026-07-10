@@ -4,7 +4,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/jkf87/hwpx-skill)](https://github.com/jkf87/hwpx-skill/releases)
 [![License](https://img.shields.io/github/license/jkf87/hwpx-skill)](LICENSE)
 
-HWP/HWPX 문서 생성, 변환, 읽기, 편집을 위한 Claude 스킬.
+HWPX 문서 생성·읽기·편집과 명시적 HWP→HWPX 변환을 위한 Claude 스킬.
 
 > ⭐ **이 스킬이 도움이 되셨다면 [GitHub에서 Star](https://github.com/jkf87/hwpx-skill)를 눌러주세요!** 한글 문서 자동화가 필요한 다른 분들에게도 닿을 수 있게 도와주세요.
 
@@ -19,7 +19,7 @@ HWP/HWPX 문서 생성, 변환, 읽기, 편집을 위한 Claude 스킬.
 | **E** | HWPX 텍스트 읽기/추출 |
 | **F** | 양식 복제 (테이블/이미지/스타일 100% 보존) |
 | **G** | 행정안전부 표준 기안문(별지 제1호서식) 생성 + 작성법 자동 검수 (2025 행정업무운영 편람) |
-| **H** | **HWP(바이너리) → HWPX 변환** |
+| **H** | **HWP(바이너리) → HWPX 명시적 변환 (손실 가능)** |
 | **I** | 문제지 1장 + 답안지 1장 HWPX 생성 |
 | **J** | **서식 보존 양식 필드 채우기** |
 
@@ -29,8 +29,8 @@ HWP/HWPX 문서 생성, 변환, 읽기, 편집을 위한 Claude 스킬.
 # 기본 의존성
 pip install python-hwpx lxml --break-system-packages
 
-# HWP→HWPX 변환 (워크플로우 H) 추가 의존성
-pip install pyhwp5 olefile --break-system-packages
+# HWP→HWPX 변환 (워크플로우 H)
+# Node.js 18+ 필요. rhwp WASM 런타임은 저장소에 고정·포함되어 별도 설치 없음.
 ```
 
 ## 빠른 시작
@@ -40,6 +40,17 @@ pip install pyhwp5 olefile --break-system-packages
 ```bash
 python3 scripts/convert_hwp.py input.hwp -o output.hwpx
 ```
+
+변환기는 `claw-hwp`가 사용하는 `@rhwp/core` 0.7.10 WASM 런타임을 고정해서
+사용한다. 실행 중 `pip install`이나 Git clone을 하지 않으며, 임시 파일을 검증한
+뒤 원자적으로 결과 경로에 교체한다. 이미지 매니페스트와 원본 크기, 미리보기,
+원본 용지·여백, 유효한 줄배치 캐시를 보존하고 표 앞의 잘못된 공백 run을
+보정한다. `check --strict`까지 통과한 파일만 출력한다.
+
+이 변환은 사용자가 `.hwpx` 결과를 명시적으로 원할 때만 사용한다. `.hwp`를 읽거나
+수정한다는 이유만으로 자동 변환하지 않는다. 포맷 변환은 원본 `.hwp`를 변경하지
+않지만 표 음영, 복잡한 도형, 간격과 쪽 나눔은 달라질 수 있으므로 원본을 함께
+보관하고 중요한 문서는 한컴에서 시각 점검한다.
 
 ### 마크다운 → HWPX 문서 생성
 
@@ -227,21 +238,16 @@ hwpx-skill/
 
 | 항목 | 지원 |
 |------|------|
-| 텍스트 | O |
-| 표 | O |
-| 이미지 (PNG/JPG/BMP/GIF) | O |
-| 도형 (사각형/원/선) | O |
-| 컨테이너 (그룹 도형) | O |
-| 각주/미주 | O |
-| 다단 | O |
-| 머리말/꼬리말 | O |
-| OLE 객체 | 부분 지원 |
-| 수식 | O (`add-equation`) |
+| 텍스트·표 | 구조 보존 회귀 테스트 |
+| 이미지 (PNG/JPG/BMP/GIF) | embedded 매니페스트·원본 크기 보정, 시각 점검 필요 |
+| 도형·컨테이너 | best effort, 시각 점검 필요 |
+| 각주/미주·다단·머리말/꼬리말 | best effort, 시각 점검 필요 |
+| OLE 객체·수식 | 구조가 남아도 렌더링 보장 안 됨 |
 
 ## 주요 규칙
 
 1. 모든 빌드 후 `fix_namespaces.py` 필수 실행
-2. `.hwp` 파일은 워크플로우 H로 HWPX 변환 후 처리
+2. `.hwp`는 원본 형식을 우선 보존하고, 사용자가 `.hwpx` 변환을 명시한 경우에만 워크플로우 H 사용
 3. 양식 복제 시 `clone_form.py` 사용 (XML 직접 조작 금지)
 4. 템플릿 간 스타일 ID 호환 불가 — 해당 템플릿 ID만 사용
 5. `mimetype`은 첫 ZIP 엔트리, `ZIP_STORED`
@@ -252,7 +258,7 @@ hwpx-skill/
 
 ## 관련 프로젝트
 
-- [hwp2hwpx-python-refactor](https://github.com/jkf87/hwp2hwpx-python-refactor) — HWP→HWPX 변환 엔진
+- [claw-hwp](https://github.com/DoHyun468/claw-hwp) — vendored rhwp 런타임과 변환 호환성 패치 참고
 - [kordoc](https://github.com/chrisryugj/kordoc) — 보존형 HWPX 양식 채우기와 ZIP 패치 설계 참고
 
 ## 라이선스
