@@ -1,234 +1,289 @@
 #!/usr/bin/env python3
 """HWP → HWPX 변환 스크립트.
 
-hwp2hwpx-python-refactor 패키지를 사용하여 HWP(바이너리) 파일을
-HWPX(개방형 XML) 파일로 변환한다.
+claw-hwp와 동일한 vendored rhwp WASM 런타임을 사용하여 HWP(바이너리)를
+HWPX(개방형 XML)로 변환한다.
 
 사용법:
     python3 convert_hwp.py input.hwp [-o output.hwpx]
     python3 convert_hwp.py input.hwp --info   # 문서 정보만 출력
 
 의존성:
-    pip install pyhwp5 olefile lxml --break-system-packages
+    Node.js 18+
 """
 
-import argparse
+from __future__ import annotations
+
 import json
 import os
+import stat
 import subprocess
 import sys
+import tempfile
+from importlib import import_module
+from pathlib import Path
+from typing import BinaryIO, NamedTuple, Protocol, TypedDict, cast
 
 
-def _ensure_dependencies():
-    """필수 패키지 확인 및 자동 설치."""
-    missing = []
-    try:
-        import olefile  # noqa: F401
-    except ImportError:
-        missing.append("olefile")
-    try:
-        import hwp5  # noqa: F401
-    except ImportError:
-        missing.append("pyhwp5")
-    try:
-        import lxml  # noqa: F401
-    except ImportError:
-        missing.append("lxml")
-
-    if missing:
-        print(f"[convert_hwp] 필수 패키지 설치 중: {', '.join(missing)}")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages"]
-            + missing,
-            stdout=subprocess.DEVNULL,
-        )
+SCRIPT_DIR = Path(__file__).resolve().parent
+RHWP_CONVERTER = SCRIPT_DIR / "rhwp_convert.mjs"
+VALIDATOR = SCRIPT_DIR / "validate.py"
+STRICT_CHECKER = SCRIPT_DIR / "fill_hwpx.py"
 
 
-def _ensure_hwp2hwpx():
-    """hwp2hwpx 패키지를 import 경로에 추가."""
-    try:
-        import hwp2hwpx  # noqa: F401
-        return
-    except ImportError:
-        pass
-
-    # 같은 사용자의 로컬 클론이 있으면 사용
-    candidates = [
-        os.path.expanduser("~/원자력연구원-claudecode/hwp2hwpx-python-refactor"),
-        os.path.join(os.path.dirname(__file__), "..", "..", "hwp2hwpx-python-refactor"),
-    ]
-    for path in candidates:
-        full = os.path.abspath(path)
-        if os.path.isdir(os.path.join(full, "hwp2hwpx")):
-            sys.path.insert(0, full)
-            try:
-                import hwp2hwpx  # noqa: F401
-                return
-            except ImportError:
-                pass
-
-    # GitHub에서 클론
-    clone_dir = os.path.join(os.path.dirname(__file__), "..", ".hwp2hwpx-repo")
-    clone_dir = os.path.abspath(clone_dir)
-    if not os.path.isdir(os.path.join(clone_dir, "hwp2hwpx")):
-        print("[convert_hwp] hwp2hwpx 레포 클론 중...")
-        subprocess.check_call(
-            ["git", "clone", "--depth", "1",
-             "https://github.com/jkf87/hwp2hwpx-python-refactor.git",
-             clone_dir],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    sys.path.insert(0, clone_dir)
-    import hwp2hwpx  # noqa: F401
+class NormalizeFunction(Protocol):
+    def __call__(
+        self,
+        source_file: BinaryIO,
+        destination_path: Path,
+        page_defs: list[PageDef] | None = None,
+    ) -> None: ...
 
 
-def _fix_char_borders(hwpx_path):
-    """변환기가 charPr마다 박은 글자 테두리를 제거 (표 셀 테두리는 보존).
-
-    hwp2hwpx는 글자모양(charPr)에 테두리 borderFill을 참조시켜 문서의 모든
-    글자에 네모 테두리가 생기는 버그가 있다. fill_hwpx.strip_char_borders로
-    보정한다. fill_hwpx가 없거나 실패해도 변환 자체는 성공으로 둔다.
-    """
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from fill_hwpx import strip_char_borders
-        removed = strip_char_borders(hwpx_path)
-        if removed:
-            print(f"[convert_hwp] 글자 테두리 제거(변환 버그 보정): {removed}개")
-    except Exception as e:  # noqa: BLE001
-        print(f"[convert_hwp] 글자 테두리 후처리 건너뜀: {e}", file=sys.stderr)
+NORMALIZE_EXPORTED_HWPX = cast(
+    NormalizeFunction,
+    getattr(
+        import_module(
+            "scripts.hwpx_export_patch" if __package__ else "hwpx_export_patch"
+        ),
+        "normalize_exported_hwpx",
+    ),
+)
 
 
-def _fix_text_direction(hwpx_path):
-    """hwp2hwpx가 셀 textDirection을 무더기로 VERTICAL로 잘못 넣는 버그 보정.
-
-    가로 양식인데 변환기가 셀 대부분을 세로쓰기로 만들어 글자가 세로로 뒤집혀
-    보이는 사고가 있다(강사카드 사례). 한 섹션에서 VERTICAL이 HORIZONTAL보다
-    많으면(=오변환 신호) 전부 HORIZONTAL로 되돌린다. 세로가 소수면(의도적
-    세로 셀일 수 있어) 건드리지 않는다. fill_hwpx가 없거나 실패해도 변환은 성공.
-    """
-    try:
-        import io
-        import zipfile
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from fill_hwpx import patch_zip_entries, section_names
-        with open(hwpx_path, "rb") as f:
-            buf = f.read()
-        repl, flipped = {}, 0
-        with zipfile.ZipFile(io.BytesIO(buf)) as zf:
-            for n in section_names(zf):
-                x = zf.read(n).decode("utf-8")
-                v = x.count('textDirection="VERTICAL"')
-                h = x.count('textDirection="HORIZONTAL"')
-                if v > h and v >= 3:
-                    repl[n] = x.replace('textDirection="VERTICAL"',
-                                        'textDirection="HORIZONTAL"').encode("utf-8")
-                    flipped += v
-        if repl:
-            with open(hwpx_path, "wb") as f:
-                f.write(patch_zip_entries(buf, repl))
-            print(f"[convert_hwp] 세로쓰기 오변환 보정: {flipped}개 셀 "
-                  "VERTICAL→HORIZONTAL")
-    except Exception as e:  # noqa: BLE001
-        print(f"[convert_hwp] 세로쓰기 후처리 건너뜀: {e}", file=sys.stderr)
+class ConversionError(RuntimeError):
+    pass
 
 
-def convert(input_path, output_path=None, fix_char_borders=True,
-            fix_text_direction=True):
+class PageDef(TypedDict):
+    width: int
+    height: int
+    marginLeft: int
+    marginRight: int
+    marginTop: int
+    marginBottom: int
+    marginHeader: int
+    marginFooter: int
+    marginGutter: int
+    landscape: bool
+    binding: int
+
+
+class CliArgs(NamedTuple):
+    input_path: str
+    output_path: str | None
+    show_info: bool
+    as_json: bool
+    keep_char_borders: bool
+
+
+class InfoResult(TypedDict):
+    title: str | None
+    author: str | None
+    subject: str | None
+    keywords: str | None
+    version: str
+    format: str
+    section_count: int
+    page_count: int
+    paragraph_count: int
+    embedded_bindata_count: int | None
+    validation_warning_count: int
+    metadata_available: bool
+
+
+def _run_checked(command: list[str]) -> str:
+    completed = subprocess.run(command, capture_output=True, text=True)
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip()
+        raise ConversionError(message)
+    return completed.stdout
+
+
+def _export_hwpx(source: Path, destination: BinaryIO) -> None:
+    completed = subprocess.run(
+        ["node", str(RHWP_CONVERTER), "--stdout", str(source)],
+        stdout=destination,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.decode("utf-8", "replace").strip()
+        raise ConversionError(message)
+    destination.flush()
+    os.fsync(destination.fileno())
+
+
+def _page_defs(source: Path) -> list[PageDef]:
+    raw = _run_checked(["node", str(RHWP_CONVERTER), "--layout-info", str(source)])
+    result = json.loads(raw)
+    if not isinstance(result, list) or not result:
+        raise ConversionError("rhwp returned malformed page geometry")
+    return cast(list[PageDef], result)
+
+
+def _output_mode(destination: Path) -> int:
+    if destination.exists():
+        return stat.S_IMODE(destination.stat().st_mode)
+    previous_umask = os.umask(0)
+    _ = os.umask(previous_umask)
+    return 0o666 & ~previous_umask
+
+
+def convert(
+    input_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str] | None = None,
+    fix_char_borders: bool = True,
+    fix_text_direction: bool = True,
+) -> str:
     """HWP 파일을 HWPX로 변환.
 
     Args:
         input_path: 입력 .hwp 파일 경로
         output_path: 출력 .hwpx 파일 경로 (기본: 같은 이름 .hwpx)
-        fix_char_borders: 변환 후 글자 테두리 버그 자동 보정 (기본 True)
-        fix_text_direction: 세로쓰기 오변환 자동 보정 (기본 True)
-
+        fix_char_borders: 이전 API 호환용. rhwp 경로에서는 별도 보정을 하지 않음.
+        fix_text_direction: 이전 API 호환용. rhwp 경로에서는 별도 보정을 하지 않음.
     Returns:
         출력 파일 경로
     """
-    _ensure_dependencies()
-    _ensure_hwp2hwpx()
-    from hwp2hwpx import convert_file
-    out = convert_file(input_path, output_path)
-    if fix_char_borders:
-        _fix_char_borders(out)
-    if fix_text_direction:
-        _fix_text_direction(out)
-    return out
+    source = Path(input_path)
+    destination = Path(output_path) if output_path else source.with_suffix(".hwpx")
+    _ = fix_char_borders, fix_text_direction
+    if source.resolve() == destination.resolve():
+        raise ConversionError("output path must differ from the input HWP path")
+    mode = _output_mode(destination)
+    page_defs = _page_defs(source)
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+    ) as staging_name:
+        staging = Path(staging_name)
+        exported_path = staging / "exported.hwpx"
+        temporary = staging / "normalized.hwpx"
+        with exported_path.open("x+b") as exported_file:
+            _export_hwpx(source, exported_file)
+            NORMALIZE_EXPORTED_HWPX(exported_file, temporary, page_defs)
+        _ = _run_checked([sys.executable, str(VALIDATOR), str(temporary)])
+        _ = _run_checked(
+            [sys.executable, str(STRICT_CHECKER), "check", str(temporary), "--strict"]
+        )
+        os.chmod(temporary, mode)
+        os.replace(temporary, destination)
+    return str(destination)
 
 
-def info(input_path):
+def info(input_path: str | os.PathLike[str]) -> InfoResult:
     """HWP 파일의 메타데이터를 딕셔너리로 반환."""
-    _ensure_dependencies()
-    _ensure_hwp2hwpx()
-    from hwp2hwpx.reader import HWPReader
-
-    with HWPReader(input_path) as reader:
-        summary = reader.get_summary_info()
-        fh = reader.get_file_header()
-        section_count = reader.get_section_count()
-        bin_data_list = reader.get_bin_data_list()
-
-    result = {
-        "title": summary.get("title", ""),
-        "author": summary.get("author", ""),
-        "subject": summary.get("subject", ""),
-        "keywords": summary.get("keywords", ""),
-        "version": f"{fh['major']}.{fh['minor']}.{fh['micro']}.{fh['build']}",
-        "section_count": section_count,
-        "embedded_bindata_count": len(bin_data_list),
-    }
-    create_time = summary.get("create_time")
-    if create_time:
-        result["create_time"] = str(create_time)
-    mod_time = summary.get("last_saved_time")
-    if mod_time:
-        result["last_saved_time"] = str(mod_time)
-    return result
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="HWP(바이너리) → HWPX(개방형 XML) 변환"
+    raw = _run_checked(["node", str(RHWP_CONVERTER), "--info", str(input_path)])
+    fields = raw.splitlines()
+    if len(fields) != 6:
+        raise ConversionError("rhwp returned malformed document information")
+    return InfoResult(
+        title=None,
+        author=None,
+        subject=None,
+        keywords=None,
+        version=fields[1],
+        format=fields[0],
+        section_count=int(fields[2]),
+        page_count=int(fields[3]),
+        paragraph_count=int(fields[4]),
+        embedded_bindata_count=None,
+        validation_warning_count=int(fields[5]),
+        metadata_available=False,
     )
-    parser.add_argument("input", help="입력 .hwp 파일 경로")
-    parser.add_argument("-o", "--output", help="출력 .hwpx 파일 경로 (기본: 같은 이름)")
-    parser.add_argument("--info", action="store_true", help="문서 정보만 출력 (변환 안 함)")
-    parser.add_argument("--json", action="store_true", help="JSON 형태로 출력")
-    parser.add_argument("--keep-char-borders", action="store_true",
-                        help="글자 테두리 자동 제거를 끔 (변환 결과 그대로 유지)")
-    args = parser.parse_args()
 
-    if not os.path.exists(args.input):
-        print(f"오류: 파일을 찾을 수 없습니다: {args.input}", file=sys.stderr)
-        sys.exit(1)
 
-    if not args.input.lower().endswith(".hwp"):
-        print(f"경고: .hwp 파일이 아닙니다: {args.input}", file=sys.stderr)
+def _usage() -> str:
+    return (
+        "usage: convert_hwp.py INPUT [-o OUTPUT] [--info] [--json] "
+        "[--keep-char-borders]\n"
+        "\nHWP(바이너리) → HWPX(개방형 XML) 변환\n"
+    )
 
+
+def _parse_cli(argv: list[str]) -> CliArgs | None:
+    if "-h" in argv or "--help" in argv:
+        print(_usage(), end="")
+        return None
+
+    output_path: str | None = None
+    input_path: str | None = None
+    show_info = False
+    as_json = False
+    keep_char_borders = False
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument.startswith("--output="):
+            output_path = argument.split("=", 1)[1]
+            if not output_path:
+                raise ConversionError("--output requires a path")
+        elif argument in ("-o", "--output"):
+            index += 1
+            if index >= len(argv):
+                raise ConversionError(f"{argument} requires a path")
+            output_path = argv[index]
+        elif argument == "--info":
+            show_info = True
+        elif argument == "--json":
+            as_json = True
+        elif argument == "--keep-char-borders":
+            keep_char_borders = True
+        elif argument.startswith("-"):
+            raise ConversionError(f"unknown option: {argument}")
+        elif input_path is None:
+            input_path = argument
+        else:
+            raise ConversionError("multiple input files are not supported")
+        index += 1
+
+    if input_path is None:
+        raise ConversionError("input HWP path is required")
+    return CliArgs(input_path, output_path, show_info, as_json, keep_char_borders)
+
+
+def main() -> int:
     try:
-        if args.info:
-            result = info(args.input)
-            if args.json:
+        args = _parse_cli(sys.argv[1:])
+        if args is None:
+            return 0
+        if not os.path.exists(args.input_path):
+            raise ConversionError(f"파일을 찾을 수 없습니다: {args.input_path}")
+        if not args.input_path.lower().endswith(".hwp"):
+            print(f"경고: .hwp 파일이 아닙니다: {args.input_path}", file=sys.stderr)
+
+        if args.show_info:
+            result = info(args.input_path)
+            if args.as_json:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             else:
                 for k, v in result.items():
                     print(f"  {k}: {v}")
         else:
-            output = convert(args.input, args.output,
-                             fix_char_borders=not args.keep_char_borders)
-            if args.json:
-                print(json.dumps({"input": args.input, "output": output,
-                                   "size": os.path.getsize(output)},
-                                  ensure_ascii=False))
+            output = convert(
+                args.input_path,
+                args.output_path,
+                fix_char_borders=not args.keep_char_borders,
+            )
+            if args.as_json:
+                print(
+                    json.dumps(
+                        {
+                            "input": args.input_path,
+                            "output": output,
+                            "size": os.path.getsize(output),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
             else:
-                print(f"변환 완료: {args.input} → {output}")
+                print(f"변환 완료: {args.input_path} → {output}")
                 print(f"  크기: {os.path.getsize(output):,} bytes")
-    except Exception as e:
+    except (ConversionError, OSError) as e:
         print(f"오류: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
