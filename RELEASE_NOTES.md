@@ -1,4 +1,4 @@
-# v1.7.0 — HWP→HWPX 변환 엔진·레이아웃 보존 개선 (Unreleased)
+# v1.7.0 — HWP→HWPX 변환 엔진·레이아웃 보존 개선 (2026-07-11)
 
 기존 Python 변환기와 실행 중 의존성 설치·Git clone 경로를 제거하고,
 `claw-hwp`에서 검증된 `@rhwp/core` 0.7.10 WASM 런타임을 저장소에 고정했습니다.
