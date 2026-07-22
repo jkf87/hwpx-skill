@@ -55,13 +55,15 @@ def main():
         tb = d / "tb.hwpx"
         code, rep = run("insert-textbox", form, tb, "--para", "last",
                         "--text", "참고 메모", "--fill", "FFF2CC",
-                        "--line", "BF9000")
+                        "--line", "BF9000", "--rounding", "25")
         check("insert-textbox 성공", code == 0 and rep and rep["ok"])
         s = sec(tb)
         check("rect +1 + drawText + 텍스트",
               s.count("<hp:rect") == base_rects + 1
               and "<hp:drawText" in s and "참고 메모" in s)
         check("채움/테두리 색", "#FFF2CC" in s and "#BF9000" in s)
+        check("둥근 모서리 ratio", 'ratio="25"' in s
+              and rep["rounding"] == 25)
         check("textbox well-formed", _wf(s))
         code, _ = run("check", tb, "--strict")
         check("textbox check --strict", code == 0)
@@ -87,6 +89,10 @@ def main():
         code, _ = run("insert-shape", form, d / "x.hwpx", "--para", "0",
                       "--fill", "ZZZ", expect=1)
         check("잘못된 색 거부(exit 1)", code == 1)
+
+        code, _ = run("insert-shape", form, d / "bad-rounding.hwpx",
+                      "--para", "0", "--rounding", "101", expect=1)
+        check("잘못된 곡률 거부(exit 1)", code == 1)
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

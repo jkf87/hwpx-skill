@@ -22,6 +22,7 @@ HWPX 문서 생성·읽기·편집과 명시적 HWP→HWPX 변환을 위한 Clau
 | **H** | **HWP(바이너리) → HWPX 명시적 변환 (손실 가능)** |
 | **I** | 문제지 1장 + 답안지 1장 HWPX 생성 |
 | **J** | **서식 보존 양식 필드 채우기** |
+| **K** | **K-Teacher 학생 활동지 HTML → 편집 가능한 HWPX** |
 
 ## 설치
 
@@ -62,6 +63,17 @@ from hwpx_helpers import *
 
 # section0.xml 조립 → build_hwpx.py로 빌드 → fix_namespaces.py 후처리
 ```
+
+### K-Teacher 학생 활동지 HTML → HWPX
+
+K-Teacher가 실제 출력하는 `.doc-header`, `section.block`, `data-block-type="student_task"`, `source_card`, `answer_box`, `exit_ticket`, 자료표와 쪽 나누기를 네이티브 HWPX 표·문단·둥근 글상자로 변환한다. 편집형 2단 제목부, 번호 섹션 레일, 라운드 `STEP` 과제 카드, 남색 표 머리, 라운드 자료 카드와 출구표를 유지하면서 한글에서 텍스트와 표를 계속 편집할 수 있다.
+
+```bash
+python3 scripts/html2hwpx.py input.html output.hwpx \
+  --keep-xml build/html2hwpx
+```
+
+중간 산출물은 `design-plan.xml → section0.xml` 순서이며, 생성 후 네임스페이스 수정·줄배치 캐시 정리·레이아웃 검증까지 자동 실행한다. 지원 HTML과 디자인 매핑은 [`references/html-to-hwpx.md`](references/html-to-hwpx.md)를 참고한다.
 
 ### 행정안전부 표준 기안문(별지 제1호서식) 생성
 
@@ -149,7 +161,7 @@ python3 scripts/fill_hwpx.py insert-chart doc.hwpx out.hwpx --type col --cat cat
 
 # 문서 테마(제목색·표머리색 일괄) / 도형·글상자 / 이미지 편집
 python3 scripts/fill_hwpx.py set-theme doc.hwpx out.hwpx --theme 남색
-python3 scripts/fill_hwpx.py insert-textbox doc.hwpx out.hwpx --after "여기" --text "참고" --fill FFF2CC
+python3 scripts/fill_hwpx.py insert-textbox doc.hwpx out.hwpx --after "여기" --text "참고" --fill FFF2CC --rounding 24
 python3 scripts/fill_hwpx.py list-images doc.hwpx
 python3 scripts/fill_hwpx.py resize-image doc.hwpx out.hwpx --index 0 --width-mm 30
 
@@ -206,6 +218,7 @@ hwpx-skill/
 │   ├── fix_namespaces.py       # 네임스페이스 후처리 (필수)
 │   ├── clone_form.py           # 양식 복제
 │   ├── md2hwpx.py              # 마크다운→HWPX 변환
+│   ├── html2hwpx.py            # K-Teacher 학생 활동지 HTML→디자인 XML→HWPX
 │   ├── gonmun.py               # 행정안전부 표준 기안문 생성기
 │   ├── gonmun_lint.py          # 공문서 작성법 자동 검수기
 │   ├── bodojaryo.py            # 정부 표준 보도자료 생성기(레퍼런스 복제)
@@ -260,6 +273,7 @@ hwpx-skill/
 
 - [claw-hwp](https://github.com/DoHyun468/claw-hwp) — vendored rhwp 런타임과 변환 호환성 패치 참고
 - [kordoc](https://github.com/chrisryugj/kordoc) — 보존형 HWPX 양식 채우기와 ZIP 패치 설계 참고
+- [k-teacher-skills](https://github.com/pblsketch/k-teacher-skills) — MIT 디자인 팔레트와 카드형 시각 패턴 참고
 
 ## 라이선스
 

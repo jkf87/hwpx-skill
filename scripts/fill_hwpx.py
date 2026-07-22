@@ -4063,8 +4063,12 @@ _MATRIX3 = ('<hp:renderingInfo>'
 
 
 def _rect_xml(xml, w, h, fill, line, text=None, dx=0, dy=0, margin=0,
-              line_w=33):
-    """floating <hp:rect> (text 있으면 글상자). w/h/dx/dy/margin=HWPUNIT."""
+              line_w=33, rounding=0):
+    """floating <hp:rect> (text 있으면 글상자).
+
+    w/h/dx/dy/margin은 HWPUNIT, rounding은 OWPML ``hp:rect@ratio``의
+    0~100 값이다. 0은 직각, 값이 커질수록 모서리가 둥글어진다.
+    """
     rid, inst = _fresh_ids(xml, 2)
     wrap = "SQUARE" if text is not None else "IN_FRONT_OF_TEXT"
     draw = ""
@@ -4082,7 +4086,7 @@ def _rect_xml(xml, w, h, fill, line, text=None, dx=0, dy=0, margin=0,
     return (
         '<hp:rect id="%d" zOrder="0" numberingType="PICTURE" textWrap="%s" '
         'textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" '
-        'groupLevel="0" instid="%d" ratio="0">'
+        'groupLevel="0" instid="%d" ratio="%d">'
         '<hp:offset x="0" y="0"/><hp:orgSz width="%d" height="%d"/>'
         '<hp:curSz width="0" height="0"/>'
         '<hp:flip horizontal="0" vertical="0"/>'
@@ -4106,7 +4110,7 @@ def _rect_xml(xml, w, h, fill, line, text=None, dx=0, dy=0, margin=0,
         'horzOffset="%d"/>'
         '<hp:outMargin left="%d" right="%d" top="%d" bottom="%d"/>'
         '<hp:shapeComment>%s</hp:shapeComment></hp:rect>'
-        % (rid, wrap, inst, w, h, _MATRIX3, line, line_w, fill, draw,
+        % (rid, wrap, inst, rounding, w, h, _MATRIX3, line, line_w, fill, draw,
            w, w, h, h, w, h, dy, dx, margin, margin, margin, margin,
            "글상자" if text is not None else "사각형"))
 
@@ -4130,32 +4134,39 @@ def _insert_floating_para(src, dst, after, para, section_idx, build_inner):
 
 def insert_shape_hwpx(src, dst, after=None, para=None, shape="rect",
                       width_mm=50.0, height_mm=20.0, fill="FFFFFF",
-                      line="000000", section_idx=0):
+                      line="000000", rounding=0, section_idx=0):
     if shape != "rect":
         raise ValueError("현재 shape는 rect만 지원합니다")
     w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
     h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    rounding = int(rounding)
+    if not 0 <= rounding <= 100:
+        raise ValueError("rounding은 0~100이어야 합니다")
     fc, lc = _norm_hex(fill), _norm_hex(line)
     sec = _insert_floating_para(
         src, dst, after, para, section_idx,
-        lambda x: _rect_xml(x, w, h, fc, lc))
+        lambda x: _rect_xml(x, w, h, fc, lc, rounding=rounding))
     return {"action": "insert-shape", "shape": shape, "section": sec,
-            "fill": fc, "line": lc}
+            "fill": fc, "line": lc, "rounding": rounding}
 
 
 def insert_textbox_hwpx(src, dst, text, after=None, para=None,
                         width_mm=60.0, height_mm=25.0, fill="FFFFFF",
-                        line="000000", section_idx=0):
+                        line="000000", rounding=0, section_idx=0):
     if text is None:
         raise ValueError("--text(글상자 내용)가 필요합니다")
     w = max(1, int(round(width_mm * HWPUNIT_PER_MM)))
     h = max(1, int(round(height_mm * HWPUNIT_PER_MM)))
+    rounding = int(rounding)
+    if not 0 <= rounding <= 100:
+        raise ValueError("rounding은 0~100이어야 합니다")
     fc, lc = _norm_hex(fill), _norm_hex(line)
     sec = _insert_floating_para(
         src, dst, after, para, section_idx,
-        lambda x: _rect_xml(x, w, h, fc, lc, text=str(text), margin=567))
+        lambda x: _rect_xml(x, w, h, fc, lc, text=str(text), margin=567,
+                            rounding=rounding))
     return {"action": "insert-textbox", "section": sec, "text": text,
-            "fill": fc, "line": lc}
+            "fill": fc, "line": lc, "rounding": rounding}
 
 
 # ─── 이미지 편집 (P13: 기존 그림 목록/리사이즈/교체/삭제) ──────────────
@@ -4725,6 +4736,8 @@ def main():
         _p.add_argument("--height-mm", type=float, dest="height_mm")
         _p.add_argument("--fill", default="FFFFFF", help="채움색 RRGGBB")
         _p.add_argument("--line", default="000000", help="테두리색 RRGGBB")
+        _p.add_argument("--rounding", type=int, default=0,
+                        help="모서리 곡률 0~100 (0=직각)")
         _p.add_argument("--section", type=int, default=0)
         if _cmd == "insert-textbox":
             _p.add_argument("--text", required=True, help="글상자 내용")
@@ -4988,7 +5001,8 @@ def main():
                 para=_parse_para(args.para),
                 width_mm=args.width_mm if args.width_mm is not None else 50.0,
                 height_mm=args.height_mm if args.height_mm is not None else 20.0,
-                fill=args.fill, line=args.line, section_idx=args.section)
+                fill=args.fill, line=args.line, rounding=args.rounding,
+                section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0
@@ -4999,7 +5013,8 @@ def main():
                 para=_parse_para(args.para),
                 width_mm=args.width_mm if args.width_mm is not None else 60.0,
                 height_mm=args.height_mm if args.height_mm is not None else 25.0,
-                fill=args.fill, line=args.line, section_idx=args.section)
+                fill=args.fill, line=args.line, rounding=args.rounding,
+                section_idx=args.section)
             _print({"input": args.input, "output": args.output,
                     **info, "ok": True})
             return 0

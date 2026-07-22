@@ -1,6 +1,6 @@
 ---
 name: hwpx
-description: "HWPX 문서(.hwpx) 생성·읽기·편집과 명시적 HWP→HWPX 변환 스킬. 'HWP 변환', 'hwp를 hwpx로', '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서' 등의 키워드 시 반드시 사용. 이 스킬은 HWP 바이너리 직접 읽기·편집은 지원하지 않으며, HWP→HWPX 변환은 사용자가 명시한 경우에만 수행한다."
+description: "HWPX 문서(.hwpx) 생성·읽기·편집, HTML 활동지→편집 가능한 HWPX 변환, 명시적 HWP→HWPX 변환 스킬. 'HWP 변환', 'hwp를 hwpx로', '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서', 'HTML을 HWPX로', 'K-Teacher 스타일', '컬러 활동지' 등의 요청 시 사용한다. 이 스킬은 HWP 바이너리 직접 읽기·편집은 지원하지 않으며, HWP→HWPX 변환은 사용자가 명시한 경우에만 수행한다."
 allowed-tools: Bash(python3 *), Read, Write, Glob, Grep
 ---
 
@@ -118,6 +118,7 @@ Rules:
  ├─ "이 양식 복제해서 내용 바꿔줘" → 워크플로우 F (양식 복제) ★
  ├─ "공문 작성해줘/공문서 검수해줘" → 워크플로우 G (공문서 작성법 준수) ★
  ├─ "문제지 한장 답안지 한장", "문제지+답안지", "정답지 포함 활동지" → 워크플로우 I ★
+ ├─ "HTML 디자인을 HWPX로", "K-Teacher 스타일", "컬러 활동지" → 워크플로우 K ★
  └─ "HWPX 읽어줘" → 워크플로우 E (읽기/추출)
 ```
 
@@ -202,6 +203,19 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/validate.py" lesson-sheet.hwpx
 - 구조 검증은 `validate.py`로 통과해야 한다.
 - 최종 HWPX의 `Contents/section0.xml`에는 `문제지`, `답안지`, `첫 번째 활동`, `두 번째 활동`, `세 번째 활동`, `정답`, `예시 답안` 텍스트가 있어야 한다.
 - JSON 입력에 `\\n`이 들어와도 실제 줄바꿈으로 정규화한다.
+
+---
+
+## 워크플로우 K: K-Teacher 학생 활동지 HTML → HWPX
+
+K-Teacher가 실제 생성하는 학생 활동지 HTML을 편집 가능한 HWPX 표·문단·네이티브 둥근 도형으로 변환한다. 임의의 브라우저 CSS를 복제하는 범용 변환기가 아니라 `.doc-header`, `section.block`, `student_task`, `source_card`, `answer_box`, `exit_ticket`, 자료표와 쪽 나누기를 결정론적으로 매핑한다. 디자인 기준은 저장소 루트 `DESIGN.md`를 따른다.
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/html2hwpx.py" input.html output.hwpx \
+  --keep-xml build/html2hwpx
+```
+
+변환 단계와 지원 HTML은 [references/html-to-hwpx.md](references/html-to-hwpx.md)를 따른다. 결과는 스크립트 내부에서 `fix_namespaces.py`, `finalize_hwpx.py --strip-linesegarray --layout`, `validate.py --layout`까지 통과해야 한다.
 
 ---
 
@@ -648,9 +662,12 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/md2hwpx.py" in.md -o out.hwpx --theme 남�
 대상 문단(`--after`/`--para`) 뒤에 사각형·글상자를 floating으로 삽입.
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-textbox doc.hwpx out.hwpx --after "여기" --text "참고 메모" --fill FFF2CC --line BF9000
-python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-shape doc.hwpx out.hwpx --para last --width-mm 40 --height-mm 15 --fill DDEBF7
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-textbox doc.hwpx out.hwpx --after "여기" --text "참고 메모" --fill FFF2CC --line BF9000 --rounding 24
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" insert-shape doc.hwpx out.hwpx --para last --width-mm 40 --height-mm 15 --fill DDEBF7 --rounding 24
 ```
+
+`--rounding`은 네이티브 `hp:rect@ratio` 값(0~100)이다. 0은 직각이며,
+활동지 카드에는 20~28 정도가 가장 안정적이다.
 
 ### 이미지 편집: `list-images` / `resize-image` / `replace-image` / `delete-image`
 
