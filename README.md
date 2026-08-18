@@ -4,7 +4,8 @@
 [![GitHub release](https://img.shields.io/github/v/release/jkf87/hwpx-skill)](https://github.com/jkf87/hwpx-skill/releases)
 [![License](https://img.shields.io/github/license/jkf87/hwpx-skill)](LICENSE)
 
-HWPX 문서 생성·읽기·편집과 명시적 HWP→HWPX 변환을 위한 Claude 스킬.
+HWP/HWPX 문서 변환·생성·읽기·편집을 위한 Claude 스킬. Windows에서는 설치된
+한컴오피스 저장 엔진으로 HWP를 빠르게 HWPX로 바꾼 뒤 후속 작업을 이어간다.
 
 > ⭐ **이 스킬이 도움이 되셨다면 [GitHub에서 Star](https://github.com/jkf87/hwpx-skill)를 눌러주세요!** 한글 문서 자동화가 필요한 다른 분들에게도 닿을 수 있게 도와주세요.
 
@@ -19,7 +20,7 @@ HWPX 문서 생성·읽기·편집과 명시적 HWP→HWPX 변환을 위한 Clau
 | **E** | HWPX 텍스트 읽기/추출 |
 | **F** | 양식 복제 (테이블/이미지/스타일 100% 보존) |
 | **G** | 행정안전부 표준 기안문(별지 제1호서식) 생성 + 작성법 자동 검수 (2025 행정업무운영 편람) |
-| **H** | **HWP(바이너리) → HWPX 명시적 변환 (손실 가능)** |
+| **H** | **HWP → HWPX 변환(Windows 한컴 COM 우선, rhwp WASM 폴백) 후 읽기·편집** |
 | **I** | 문제지 1장 + 답안지 1장 HWPX 생성 |
 | **J** | **서식 보존 양식 필드 채우기** |
 | **K** | **K-Teacher 학생 활동지 HTML → 편집 가능한 HWPX** |
@@ -31,27 +32,46 @@ HWPX 문서 생성·읽기·편집과 명시적 HWP→HWPX 변환을 위한 Clau
 pip install python-hwpx lxml --break-system-packages
 
 # HWP→HWPX 변환 (워크플로우 H)
-# Node.js 18+ 필요. rhwp WASM 런타임은 저장소에 고정·포함되어 별도 설치 없음.
+# Windows 우선 경로: 한컴오피스 한글 + HwpAutomation 파일 경로 보안 모듈
+# 폴백 경로: Node.js 18+, rhwp WASM 런타임은 저장소에 고정·포함
 ```
 
 ## 빠른 시작
 
 ### HWP → HWPX 변환
 
+Windows에 한컴오피스 한글이 설치되어 있으면 실제 한글 저장 엔진을 우선 사용한다.
+한 프로세스를 재사용해 폴더 안의 `.hwp`를 빠르게 일괄 변환하며 원본은 그대로 둔다.
+
+```powershell
+# 파일 하나
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "scripts/convert_hwp_hancom.ps1" "input.hwp"
+
+# 폴더 전체를 별도 폴더로 변환
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "scripts/convert_hwp_hancom.ps1" "." `
+  -OutputDirectory ".\converted" -Overwrite
+```
+
+한컴 COM 엔진 또는 등록된 파일 경로 보안 모듈을 사용할 수 없으면 Node.js 18+
+기반의 기존 크로스플랫폼 변환기로 폴백한다.
+
 ```bash
 python3 scripts/convert_hwp.py input.hwp -o output.hwpx
 ```
 
-변환기는 `claw-hwp`가 사용하는 `@rhwp/core` 0.7.10 WASM 런타임을 고정해서
-사용한다. 실행 중 `pip install`이나 Git clone을 하지 않으며, 임시 파일을 검증한
-뒤 원자적으로 결과 경로에 교체한다. 이미지 매니페스트와 원본 크기, 미리보기,
-원본 용지·여백, 유효한 줄배치 캐시를 보존하고 표 앞의 잘못된 공백 run을
-보정한다. `check --strict`까지 통과한 파일만 출력한다.
+COM 변환기는 결과를 임시 HWPX에 저장한 뒤 대상 경로에 교체해 실패 시 기존
+출력을 보존한다. 폴더 입력은 `.hwp`만 정확히 고르며 `.hwpx`를 재변환하지 않는다.
+폴백 변환기는 `claw-hwp`가 사용하는 `@rhwp/core` 0.7.10 WASM 런타임을 고정해서
+사용한다. 실행 중 `pip install`이나 Git clone을 하지 않으며 이미지 매니페스트,
+원본 크기, 미리보기, 용지·여백과 유효한 줄배치 캐시를 보정한 뒤
+`check --strict`까지 통과한 파일만 출력한다.
 
-이 변환은 사용자가 `.hwpx` 결과를 명시적으로 원할 때만 사용한다. `.hwp`를 읽거나
-수정한다는 이유만으로 자동 변환하지 않는다. 포맷 변환은 원본 `.hwp`를 변경하지
-않지만 표 음영, 복잡한 도형, 간격과 쪽 나눔은 달라질 수 있으므로 원본을 함께
-보관하고 중요한 문서는 한컴에서 시각 점검한다.
+`.hwp`의 읽기·추출·편집을 요청하면 원본을 보존한 별도 HWPX로 자동 변환한 뒤
+해당 워크플로우를 계속한다. 사용자가 HWP 형식 유지나 변환 금지를 명시하면 자동
+변환하지 않는다. 포맷 차이로 표 음영, 복잡한 도형, 간격과 쪽 나눔이 달라질 수
+있으므로 중요한 문서는 원본과 함께 보관하고 한컴에서 시각 점검한다.
 
 ### 마크다운 → HWPX 문서 생성
 
@@ -214,6 +234,7 @@ hwpx-skill/
 ├── scripts/
 │   ├── hwpx_helpers.py         # 헬퍼 라이브러리 (배너/섹션바/이미지/빌드)
 │   ├── convert_hwp.py          # HWP→HWPX 변환
+│   ├── convert_hwp_hancom.ps1  # Windows 한컴 COM 고속·일괄 변환
 │   ├── build_hwpx.py           # 템플릿+XML → .hwpx 조립
 │   ├── fix_namespaces.py       # 네임스페이스 후처리 (필수)
 │   ├── clone_form.py           # 양식 복제
@@ -249,18 +270,17 @@ hwpx-skill/
 
 ## HWP→HWPX 변환 지원 범위
 
-| 항목 | 지원 |
-|------|------|
-| 텍스트·표 | 구조 보존 회귀 테스트 |
-| 이미지 (PNG/JPG/BMP/GIF) | embedded 매니페스트·원본 크기 보정, 시각 점검 필요 |
-| 도형·컨테이너 | best effort, 시각 점검 필요 |
-| 각주/미주·다단·머리말/꼬리말 | best effort, 시각 점검 필요 |
-| OLE 객체·수식 | 구조가 남아도 렌더링 보장 안 됨 |
+| 항목 | 한컴 COM | rhwp WASM |
+|------|----------|-----------|
+| 텍스트·표 | 실제 한글 저장 엔진 | 구조 보존 회귀 테스트 |
+| 이미지·도형·컨테이너 | 원본 재현 우선, 시각 점검 필요 | best effort, 시각 점검 필요 |
+| 각주/미주·다단·머리말/꼬리말 | 원본 재현 우선, 시각 점검 필요 | best effort, 시각 점검 필요 |
+| OLE 객체·수식 | 한컴 지원 범위 | 구조가 남아도 렌더링 보장 안 됨 |
 
 ## 주요 규칙
 
 1. 모든 빌드 후 `fix_namespaces.py` 필수 실행
-2. `.hwp`는 원본 형식을 우선 보존하고, 사용자가 `.hwpx` 변환을 명시한 경우에만 워크플로우 H 사용
+2. `.hwp`의 변환·읽기·편집은 원본을 보존한 별도 HWPX를 만든 뒤 진행
 3. 양식 복제 시 `clone_form.py` 사용 (XML 직접 조작 금지)
 4. 템플릿 간 스타일 ID 호환 불가 — 해당 템플릿 ID만 사용
 5. `mimetype`은 첫 ZIP 엔트리, `ZIP_STORED`

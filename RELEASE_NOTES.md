@@ -1,3 +1,54 @@
+# v1.9.0 — Windows 한컴 엔진 HWP→HWPX 고속·일괄 변환 (2026-08-18)
+
+Windows에 한컴오피스 한글이 설치된 환경에서 실제 한글 Automation COM 엔진으로
+HWP를 HWPX로 빠르게 변환하는 경로를 추가했습니다. 한 번 생성한 한글 프로세스를
+배치 전체에서 재사용하므로 폴더 단위 변환이 빠르고, 한컴 엔진을 사용할 수 없는
+환경에서는 기존 `rhwp` WASM 변환기로 폴백합니다.
+
+## 주요 변경
+
+- `scripts/convert_hwp_hancom.ps1`을 추가했습니다. 파일·폴더 입력,
+  `-OutputDirectory`, `-Recurse`, `-Overwrite`, `-Visible`을 지원합니다.
+- 폴더 입력에서 `.hwp` 확장자만 정확히 선택해 `.hwpx`를 다시 변환하지 않습니다.
+- `HWPFrame.HwpObject`를 파일마다 재실행하지 않고 전체 배치에서 재사용합니다.
+- 등록된 `HwpAutomation` 파일 경로 보안 모듈을 자동으로 찾아
+  `FilePathCheckDLL`로 등록합니다.
+- 결과를 대상 폴더의 임시 HWPX에 먼저 저장하고 성공 후 교체해, 실패 시 기존
+  출력 파일을 보존합니다.
+- 여러 입력이 하나의 출력 폴더에서 같은 파일명으로 충돌하면 변환 전에 중단합니다.
+
+## 스킬 동작 변경
+
+- Windows에서는 한컴 COM 변환기를 우선 사용하고, COM 엔진이나 보안 모듈을
+  사용할 수 없으면 내장 `convert_hwp.py` 경로로 폴백합니다.
+- 사용자가 HWP의 읽기·추출·편집·양식 채우기를 요청하면 원본을 보존한 별도
+  HWPX를 만든 뒤 기존 E/C/J/F 워크플로우를 계속합니다.
+- 사용자가 HWP 형식 유지나 변환 금지를 명시하면 자동 변환하지 않습니다.
+- COM 변환 결과에도 `validate.py`, `fill_hwpx.py check --strict`, 가능한 경우
+  `validate.py --hancom` 검증을 적용하도록 문서화했습니다.
+- 기존 Node.js 18+ `rhwp` WASM CLI와 Python API는 변경 없이 유지됩니다.
+
+## 호환성
+
+- 새 PowerShell 변환기는 Windows와 설치된 한컴오피스 한글이 필요합니다.
+- 파일 경로 보안 경고 없이 자동화하려면
+  `HKCU\Software\HNC\HwpAutomation\Modules`에 호환 보안 모듈이 등록되어야 합니다.
+- 한컴 COM 요구 사항을 만족하지 않는 환경에서는 v1.8.0과 같은 vendored
+  `@rhwp/core` 0.7.10 변환 경로를 계속 사용할 수 있습니다.
+
+## 검증
+
+- PowerShell 구문과 회귀 테스트에서 정확한 확장자 필터, 새 출력과 기존 출력의
+  원자 교체, 임시 파일 정리를 검증했습니다.
+- 실제 한컴오피스 11.0.0.8362 엔진으로 HWP 6개를 한 프로세스에서 4.146초에
+  변환했습니다. 생성된 6개 HWPX는 모두 구조 검사, strict 게이트, 한컴 재열기를
+  통과했습니다.
+- 기존 rhwp 변환 테스트 9개와 Python 테스트 스크립트 20개 중 19개가 통과했습니다.
+  변경하지 않은 `test_report_placeholder_hook.py`는 공백이 있는 Windows 절대 경로를
+  정규식으로 추출하지 못하는 기존 플랫폼 한계로 5/7만 통과했습니다.
+
+---
+
 # v1.8.0 — K-Teacher 활동지 HTML→HWPX·라운드 카드 디자인 (2026-07-22)
 
 K-Teacher 학생 활동지의 카드형 디자인을 편집 가능한 HWPX로 옮기는
