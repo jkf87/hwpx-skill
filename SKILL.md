@@ -1,7 +1,7 @@
 ---
 name: hwpx
-description: "HWPX 문서(.hwpx) 생성·읽기·편집, HTML 활동지→편집 가능한 HWPX 변환, 명시적 HWP→HWPX 변환 스킬. 'HWP 변환', 'hwp를 hwpx로', '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서', 'HTML을 HWPX로', 'K-Teacher 스타일', '컬러 활동지' 등의 요청 시 사용한다. 이 스킬은 HWP 바이너리 직접 읽기·편집은 지원하지 않으며, HWP→HWPX 변환은 사용자가 명시한 경우에만 수행한다."
-allowed-tools: Bash(python3 *), Read, Write, Glob, Grep
+description: "HWP/HWPX 문서(.hwp, .hwpx) 변환·생성·읽기·편집, HTML 활동지→편집 가능한 HWPX 변환 스킬. 'HWP 변환', 'hwp를 hwpx로', '한글 문서', 'hwpx', 'HWPX', '한글파일', '.hwpx 만들어줘', '보고서', '공문', '기안문', '한글로 작성', '회의록', '제안서', '이미지 포함 문서', 'HTML을 HWPX로', 'K-Teacher 스타일', '컬러 활동지' 등의 요청 시 사용한다. Windows에서는 설치된 한컴오피스 Automation COM 엔진으로 HWP를 HWPX로 빠르게 변환한 뒤 읽기·편집을 이어가며, 사용할 수 없으면 내장 rhwp WASM 변환기로 폴백한다."
+allowed-tools: Bash(python3 *), Bash(powershell.exe *), Bash(pwsh *), Read, Write, Glob, Grep
 ---
 
 # HWPX 통합 문서 스킬
@@ -16,6 +16,7 @@ ${CLAUDE_SKILL_DIR}/
 ├── scripts/
 │   ├── hwpx_helpers.py        # ★ 헬퍼 라이브러리 (배너/섹션바/이미지/빌드 함수)
 │   ├── convert_hwp.py         # ★ HWP→HWPX 변환 (Workflow H)
+│   ├── convert_hwp_hancom.ps1 # ★ Windows 한컴 COM 고속·일괄 변환 (Workflow H 우선)
 │   ├── build_hwpx.py          # 템플릿+XML → .hwpx 조립
 │   ├── fix_namespaces.py      # ★ 필수: 네임스페이스 후처리
 │   ├── validate.py            # HWPX 구조 검증
@@ -63,8 +64,9 @@ ${CLAUDE_SKILL_DIR}/
 
 ```bash
 pip install python-hwpx lxml --break-system-packages
-# HWP→HWPX 변환 (Workflow H): Node.js 18+
-# rhwp WASM 런타임은 scripts/vendor/rhwp에 고정·포함되어 별도 설치 없음
+# HWP→HWPX 변환 (Workflow H)
+# Windows: 한컴오피스 한글 + HwpAutomation 파일 경로 보안 모듈 권장(추가 Python 의존성 없음)
+# 그 외/폴백: Node.js 18+, rhwp WASM 런타임은 scripts/vendor/rhwp에 고정·포함
 ```
 
 ## Mandatory Finalization And QA
@@ -109,7 +111,7 @@ Rules:
 
 ```
 사용자 요청
- ├─ ".hwp 파일 → .hwpx 변환" → 워크플로우 H (HWP→HWPX 변환) ★★
+ ├─ ".hwp 파일 → 변환/읽기/편집" → 워크플로우 H로 별도 HWPX 생성 후 해당 워크플로우 계속 ★★
  ├─ "마크다운/텍스트/URL → HWPX" → 워크플로우 A (콘텐츠→HWPX)
  ├─ "양식의 빈칸/필드 채워줘" (라벨-값, 체크박스, 괄호 빈칸) → 워크플로우 J (필드 채우기) ★★★
  ├─ "양식에 내용 채워줘" ({{플레이스홀더}} 템플릿) → 워크플로우 B (템플릿 치환)
@@ -124,21 +126,20 @@ Rules:
 
 ### ⚠️ 원본 형식 보존 규칙 (사용자가 .hwp 파일을 제공한 경우)
 
-> **`.hwp`를 받았다는 이유만으로 자동 변환하지 않는다. 사용자가 `.hwpx` 변환을
-> 명시한 경우에만 워크플로우 H를 실행하고, 그 외에는 원본 형식을 보존한다.**
+> **HWP 바이너리는 직접 수정하지 않는다. 읽기·편집 등 작업에 HWP 내용이 필요하면
+> 원본을 그대로 보존하고 별도 `.hwpx`를 자동 생성한 뒤 후속 워크플로우를 계속한다.**
 
 ```
 입력 파일 확인
  ├─ .hwp 파일
  │   ├─ "HWPX로 변환해줘" → 워크플로우 H (원본 유지, 별도 .hwpx 출력)
- │   ├─ "읽어줘/텍스트 추출" → 이 스킬의 HWP 직접 읽기 미지원 안내; 자동 변환 금지
- │   └─ "수정해줘/채워줘" → 이 스킬의 HWP 직접 편집 미지원 안내; 자동 변환 금지
+ │   ├─ "읽어줘/텍스트 추출" → 워크플로우 H → E
+ │   └─ "수정해줘/채워줘" → 워크플로우 H → C/J/F (별도 HWPX 결과)
  └─ .hwpx 파일 → 기존 워크플로우 판별 (아래)
 ```
 
-HWP 읽기·편집을 계속하려면 원본 형식을 다루는 별도 도구가 필요하다. 이 스킬만
-사용 가능한 환경에서는 원본을 보존한 채 별도 HWPX 산출물로 변환할지 사용자의
-명시적 선택을 받아야 하며, 변환하지 않은 작업을 완료했다고 보고하지 않는다.
+변환으로 생긴 HWPX는 반드시 검증한 뒤 사용한다. 사용자가 결과 형식을 HWP로
+유지하라고 명시했거나 변환을 금지한 경우에는 자동 변환하지 말고 제한을 안내한다.
 
 ### ⚠️ 자동 판별 규칙 (사용자가 양식 파일을 제공한 경우)
 
@@ -756,8 +757,8 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check output.hwpx --strict
 | `{{이름}}` 같은 플레이스홀더가 박힌 전용 템플릿 | B |
 
 > J가 타겟을 못 찾으면(`analyze`의 target_count가 0) `replace`(문구 교체)나
-> F로 전환한다. **.hwp 입력은 자동 변환하지 않는다. 원본 HWP 직접 편집이 불가능하고
-> 사용자가 별도 HWPX 산출물을 요구한 경우에만 워크플로우 H 후 J를 적용한다.**
+> F로 전환한다. **.hwp 입력은 원본을 보존한 별도 HWPX로 워크플로우 H 변환한 뒤
+> J를 적용하며, 결과가 HWPX라는 점을 사용자에게 명확히 알린다.**
 
 ---
 
@@ -1049,29 +1050,62 @@ echo "2025.1.6 오후 3시 회의" | python3 scripts/gonmun_lint.py   # 표준�
 
 ## 워크플로우 H: HWP → HWPX 변환 ★★
 
-> **HWP(바이너리)를 HWPX(개방형 XML)로 명시적으로 변환하는 손실 가능 워크플로우.**
->
-> 원본 형식 유지가 기본이다. HWPX가 반드시 필요한 경우에만 별도 파일로 변환한다.
+> **HWP 바이너리를 직접 읽거나 수정하지 않고, 원본을 보존한 별도 HWPX로 변환한다.**
+> Windows에서는 실제 한컴오피스 저장 엔진을 우선 사용하고, 불가능하면 내장
+> `rhwp` WASM 변환기로 폴백한다.
 
 ### 트리거 조건
 
-- 사용자가 `.hwp` 파일 경로와 함께 `.hwpx` 변환을 명시
-- "HWP를 HWPX로 변환", "hwp를 hwpx로" 등
+- 사용자가 `.hwp` 파일의 변환을 요청
+- `.hwp` 문서의 읽기·추출·편집·양식 채우기를 요청하여 후속 작업에 HWPX가 필요
+- "HWP를 HWPX로", "한글 파일 읽어줘/수정해줘" 등
 
 ### 전체 흐름
 
 ```
-[1] .hwp 파일 확인
-[2] convert_hwp.py로 원본과 다른 경로에 .hwpx 생성
-[3] 이미지·미리보기 보정 + 원본 용지/여백·줄배치 보존 + 표 앞 공백 run 정리
+[1] 정확히 .hwp 확장자인 입력 파일 확인
+[2] Windows + 한컴오피스이면 convert_hwp_hancom.ps1로 변환
+ └─ COM 엔진 또는 파일 경로 보안 모듈을 사용할 수 없으면 convert_hwp.py로 폴백
+[3] 원본과 다른 경로에 .hwpx 생성(원본 HWP 보존)
 [4] validate.py + fill_hwpx.py check --strict 검증
-[5] 원본과 결과를 함께 보관하고 중요 문서는 한컴에서 시각 점검
+[5] 요청에 따라 E(읽기), C/J/F(편집·양식) 워크플로우 계속
+[6] 중요 문서는 한컴에서 시각 점검
 ```
 
-> ⚠️ **호환성 주의**: 포맷 변환은 표 음영, 복잡한 도형, 간격과 쪽 나눔을
-> 바꿀 수 있다. 구조 검증 통과가 한컴에서의 시각 동일성을 보장하지 않는다.
+> ⚠️ **호환성 주의**: 한컴 COM 경로가 원본 재현에 가장 유리하지만 HWP와 HWPX의
+> 표현 차이는 남는다. 구조 검증 통과가 모든 표 음영·복잡한 도형·쪽 나눔의 시각
+> 동일성을 보장하지 않으므로 원본도 함께 보관한다.
 
-### CLI 사용법
+### Windows 한컴 COM 고속 변환(우선)
+
+한컴오피스 한글과 `HwpAutomation` 파일 경로 보안 모듈이 등록된 Windows에서
+사용한다. 한 번 생성한 `HWPFrame.HwpObject`를 전체 배치에서 재사용하므로 여러
+파일을 한꺼번에 변환할 때 특히 빠르다. 결과는 임시 HWPX로 저장한 뒤 대상 경로에
+교체하여 실패 시 기존 출력 파일을 보존한다.
+
+```powershell
+# 파일 하나(같은 폴더에 같은 이름 .hwpx)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "${CLAUDE_SKILL_DIR}/scripts/convert_hwp_hancom.ps1" "input.hwp"
+
+# 폴더 안의 모든 .hwp를 별도 폴더로 일괄 변환
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "${CLAUDE_SKILL_DIR}/scripts/convert_hwp_hancom.ps1" "." `
+  -OutputDirectory ".\converted" -Overwrite
+
+# 하위 폴더까지 탐색. -Visible을 추가하면 한글 창을 표시한다.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "${CLAUDE_SKILL_DIR}/scripts/convert_hwp_hancom.ps1" "." `
+  -OutputDirectory ".\converted" -Recurse -Overwrite
+```
+
+폴더 입력은 `.hwp`만 정확히 선택하며 `.hwpx`는 다시 변환하지 않는다. 하나의 출력
+폴더에 같은 기본 이름의 입력이 둘 이상 모이면 덮어쓰지 않고 충돌을 보고한다.
+
+### 내장 rhwp 변환(폴백·크로스플랫폼)
+
+Windows 한컴 COM 호출이 실패하거나 한컴오피스가 없는 환경에서는 기존 변환기를
+그대로 사용한다. Node.js 18+가 필요하며 vendored 런타임 외 추가 설치는 없다.
 
 ```bash
 # 기본 변환 (같은 이름 .hwpx로 출력)
@@ -1081,16 +1115,10 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp
 python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp -o output.hwpx
 
 # 문서 정보 확인 (변환 없이)
-python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --info
-
-# JSON 출력
 python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --info --json
-
-# 이전 CLI 호환용(현재 rhwp 경로에서는 no-op)
-python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" input.hwp --keep-char-borders
 ```
 
-### Python API
+### Python API(rhwp 폴백)
 
 ```python
 import sys
@@ -1098,55 +1126,50 @@ from pathlib import Path
 sys.path.insert(0, str(Path("${CLAUDE_SKILL_DIR}/scripts")))
 from convert_hwp import convert, info
 
-# 변환
 output_path = convert("input.hwp", "output.hwpx")
-
-# 정보 확인
 metadata = info("input.hwp")
 print(metadata["version"], metadata["section_count"])
-# title/author/subject/keywords는 현재 rhwp API가 제공하지 않아 None
 ```
 
-### 변환 후 후속 작업 예시
+### 변환 후 검증과 후속 작업
 
-```bash
-# HWP → HWPX 변환
-python3 "${CLAUDE_SKILL_DIR}/scripts/convert_hwp.py" doc.hwp -o doc.hwpx
+COM 변환 결과는 아래 게이트를 명시적으로 실행한다. `convert_hwp.py`는 같은 구조·
+strict 게이트를 내부에서 실행하지만 후속 작업 전에 다시 확인해도 안전하다. Windows
+PowerShell에서 한글·특수문자 출력이 깨지면 Python 실행 전에 UTF-8 모드를 켠다.
 
-# 검증(변환기 내부에서도 동일 게이트 실행)
-python3 "${CLAUDE_SKILL_DIR}/scripts/validate.py" doc.hwpx
-python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check doc.hwpx --strict
+```powershell
+$env:PYTHONUTF8 = "1"
+python3 "${CLAUDE_SKILL_DIR}/scripts/validate.py" "doc.hwpx"
+python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" check "doc.hwpx" --strict
+python3 "${CLAUDE_SKILL_DIR}/scripts/validate.py" "doc.hwpx" --hancom
 
-# 텍스트 추출 (Workflow E)
-python3 "${CLAUDE_SKILL_DIR}/scripts/text_extract.py" doc.hwpx
+# Workflow E: 텍스트 추출
+python3 "${CLAUDE_SKILL_DIR}/scripts/text_extract.py" "doc.hwpx"
 
-# 양식 복제 (Workflow F)
-python3 "${CLAUDE_SKILL_DIR}/scripts/clone_form.py" doc.hwpx output.hwpx --map map.json
-python3 "${CLAUDE_SKILL_DIR}/scripts/fix_namespaces.py" output.hwpx
+# Workflow F: 양식 복제 후 필수 마무리
+python3 "${CLAUDE_SKILL_DIR}/scripts/clone_form.py" "doc.hwpx" "output.hwpx" --map "map.json"
+python3 "${CLAUDE_SKILL_DIR}/scripts/fix_namespaces.py" "output.hwpx"
 ```
 
 ### 변환 엔진과 의존성
 
-- Node.js 18+
-- `@rhwp/core` 0.7.10 WASM 런타임을 `scripts/vendor/rhwp`에 고정·포함
-- 실행 중 패키지 설치나 Git clone 없음
-- 이미지 `isEmbeded`, 0 크기와 미리보기 보정
-- 원본의 섹션별 용지·여백과 유효한 `linesegarray`를 보존하고, 표를 중복
-  배치시키는 whitespace-only `<hp:t>`만 제거
-- 임시 HWPX를 `validate.py`와 `check --strict`로 검사한 뒤 결과 경로에 원자적으로 교체
+| 우선순위 | 엔진 | 요구 사항 | 특징 |
+|---------|------|----------|------|
+| 1 | 한컴오피스 Automation COM | Windows, 한컴오피스 한글, 등록된 파일 경로 보안 모듈 | 실제 한글 저장 엔진, 한 프로세스 배치 재사용 |
+| 2 | `@rhwp/core` 0.7.10 WASM | Node.js 18+ | 크로스플랫폼, 저장소에 런타임 고정·포함 |
 
-> 원본 `.hwp`는 변경하지 않는다. HWP와 HWPX 표현 차이로 일부 고급 개체가
-> 달라질 수 있으므로 변환 후 원본과 결과를 함께 보관한다.
+두 경로 모두 실행 중 패키지 설치나 Git clone을 하지 않고 원본 `.hwp`를 변경하지
+않는다. rhwp 경로는 이미지·미리보기·원본 용지/여백과 유효한 줄배치 캐시를
+보정하고, 임시 HWPX가 검증을 통과한 뒤 결과 경로에 원자적으로 교체한다.
 
 ### 지원 범위
 
-| 항목 | 지원 |
-|------|------|
-| 텍스트·표 | 구조 보존 회귀 테스트 |
-| 이미지 (PNG/JPG/BMP/GIF) | embedded 매니페스트·원본 크기 보정, 시각 점검 필요 |
-| 도형·컨테이너 | best effort, 시각 점검 필요 |
-| 각주/미주·다단·머리말/꼬리말 | best effort, 시각 점검 필요 |
-| OLE 객체·수식 | 구조가 남아도 렌더링 보장 안 됨 |
+| 항목 | 한컴 COM | rhwp WASM |
+|------|----------|-----------|
+| 텍스트·표 | 실제 한글 저장 엔진 | 구조 보존 회귀 테스트 |
+| 이미지·도형·컨테이너 | 원본 재현 우선, 시각 점검 필요 | best effort, 시각 점검 필요 |
+| 각주/미주·다단·머리말/꼬리말 | 원본 재현 우선, 시각 점검 필요 | best effort, 시각 점검 필요 |
+| OLE 객체·수식 | 한컴 지원 범위 | 구조가 남아도 렌더링 보장 안 됨 |
 
 ---
 
@@ -1184,7 +1207,7 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 ## Critical Rules
 
 0. **★★★ 배포 전 필수 게이트 (최우선)**: .hwpx를 사용자에게 전달(open·복사·"완성" 보고)하기 직전 **반드시** `fill_hwpx.py check output.hwpx --strict`를 실행하고 **exit 0일 때만 전달**한다. exit 2면 secPr 이식 / 정상 베이스로 재작업 / `fix-borders` 중 해당 수정 후 재check. 변환·생성·편집 어느 경로든 예외 없음. (과거 사고 3종 — 손상 문서·빈 페이지·글자 테두리 — 전부 이 한 줄로 잡힌다)
-1. **원본 형식 우선**: `.hwp`는 자동 변환하지 않는다. 사용자가 별도 `.hwpx` 산출물을 명시한 경우에만 워크플로우 H 사용
+1. **HWP 원본 보존**: `.hwp` 내용이 필요한 변환·읽기·편집 요청은 워크플로우 H로 별도 `.hwpx`를 만든 뒤 계속한다. 원본 HWP를 덮어쓰거나 직접 수정하지 않는다
 2. **secPr 필수**: 첫 문단 첫 run에 secPr + colPr
 3. **mimetype**: 첫 ZIP 엔트리, ZIP_STORED
 4. **네임스페이스**: `hp:`, `hs:`, `hh:`, `hc:` 접두사 유지
@@ -1204,6 +1227,7 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 18. **Real openability check**: on Windows with Hancom installed, run `validate.py --hancom`; ZIP/XML validation alone is not enough.
 19. **변환 이상 탐지**: `check --strict`가 글자 테두리·세로쓰기 우세를 차단한다. 원본과 비교해 실제 오변환일 때만 `fix-borders`나 textDirection 교정을 적용
 20. **배포 전 열림 점검**: 사용자에게 파일을 주기 전 `fill_hwpx.py check --strict`로 secPr 불완전(손상 문서)·raw 파일(빈 페이지)을 확인
+21. **HWP 변환 엔진 우선순위**: Windows에서는 `convert_hwp_hancom.ps1`의 한컴 COM 엔진을 먼저 사용하고, 사용할 수 없을 때만 `convert_hwp.py`의 rhwp WASM 경로로 폴백
 
 ---
 
