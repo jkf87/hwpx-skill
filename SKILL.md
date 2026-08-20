@@ -691,6 +691,40 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" fill form.hwpx out.hwpx --cel
 # --values와 --cells는 동시 사용 가능 (라벨 매칭 후 좌표 채움 순서)
 ```
 
+### ★★★ 치환 게이트: replace 를 돌리기 전/후 반드시 통과시킬 것
+
+> **레퍼런스 복제(Workflow F/계획서·보도자료) 계열에서 실제로 가장 많이 난 사고는
+> "치환이 조용히 안 먹어 원본 부처 문구가 그대로 배포되는 것"이다.**
+> 원인은 사람 주의력으로 못 막는 종류라 도구로 막는다(실측, gyehoek-reference 기준):
+> · `‧`(U+2027) 89회 / `·`(U+00B7) 86회가 섞여 있다 — 눈으로 구별 불가.
+>   텍스트를 보고 키를 타이핑하면 약 50% 확률로 빗나간다.
+> · 글머리 글리프가 사설영역 문자(U+F02B1 등 21개)라 옮길 때 유실된다.
+> · 28개 문단에 `<hp:fwSpace/>`·`<hp:tab/>`이 있고, `<hp:t>` 사이에 낀 것은
+>   문구를 쪼갠다. 매처는 `<hp:t>` 텍스트만 이어붙이므로 그 경계를 넘는 키는 실패한다.
+> · 눈으로 한 줄로 보이는 것이 실제로는 별개 문단 2~3개인 경우가 있다.
+
+```bash
+# [1] 키는 손으로 타이핑하지 말고, 매처와 같은 방식으로 문서에서 뽑아 쓴다
+python3 scripts/map_preflight.py dump <base.hwpx> [--grep 검색어]
+
+# [2] replace 전 사전검증 — 못 맞출 키를 원인과 교정안까지 짚어준다
+python3 scripts/map_preflight.py check <base.hwpx> --map map.json [--fix fixed.json]
+
+# [3] 치환 (하나라도 못 찾으면 자동 진단 후 exit 2 로 차단된다)
+python3 scripts/fill_hwpx.py replace <base.hwpx> <out.hwpx> --map map.json
+
+# [4] ★ 잔재 전수 대조 — 맵에 '아예 안 넣은' 문단에 원본이 남았는지는
+#     이것만 잡는다. 하드코딩 단어 grep 으로는 반드시 놓친다.
+python3 scripts/map_preflight.py residue <out.hwpx> --against <base.hwpx> \
+    [--ignore "유지할 범용 라벨"]
+```
+
+- `check` 가 **"전부 매칭"** 이 아니면 replace 를 돌리지 마라.
+- `residue` 가 **0개**가 아니면 사용자에게 전달하지 마라. 남은 문단은
+  ① 맵에 추가해 치환하거나 ② 의도한 범용 라벨이면 `--ignore` 로 명시 제외한다.
+- `replace` 는 이제 **부분 성공을 성공으로 보고하지 않는다**(not_found 있으면 exit 2).
+  의도적으로 넘기려면 `--allow-unmatched` 를 명시해야 한다.
+
 ### ★★★ 필수 게이트: 사용자에게 파일을 주기 전 반드시 통과시킬 것
 
 > **모든 .hwpx 산출물은 사용자에게 전달(open·복사·첨부·"완성했습니다" 보고)하기

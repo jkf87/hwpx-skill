@@ -50,6 +50,7 @@ from __future__ import annotations  # Python 3.9 호환: str | None 등 어노�
 import argparse
 import io
 import json
+import os
 import re
 import struct
 import sys
@@ -4380,6 +4381,37 @@ def _print(obj):
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def _diagnose_unmatched(path, mapping, not_found):
+    """못 찾은 키의 원인을 map_preflight 로 진단해 stderr 로 출력."""
+    import importlib.util
+    mp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "map_preflight.py")
+    if not os.path.exists(mp_path):
+        raise RuntimeError("map_preflight.py 없음")
+    spec = importlib.util.spec_from_file_location("map_preflight", mp_path)
+    mp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mp)
+
+    paras = mp.load_paras(path)
+    folded = [(mp.fold(t), t) for t, _ in paras]
+    for key in not_found:
+        fk = mp.fold(key)
+        hit = next((t for f, t in folded if fk and fk in f), None)
+        if hit:
+            print(f"  · 혼동문자 불일치(·/‧, 따옴표, 글머리 등)\n"
+                  f"      준 키   : {key}\n"
+                  f"      실제 원문: {hit}", file=sys.stderr)
+            continue
+        span = mp.find_span(fk, [(f, t, False) for f, t in folded])
+        if span:
+            print(f"  · 문단합침 — 이 키는 실제로 {len(span)}개의 별개 문단이다. "
+                  f"아래처럼 쪼개라:", file=sys.stderr)
+            for x in span:
+                print(f"      · {x}", file=sys.stderr)
+            continue
+        print(f"  · 문서에 없음(오타/다른 문서/이미 치환됨): {key}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="HWPX 원본 보존 채우기 (analyze → fill → verify)")
@@ -4401,6 +4433,9 @@ def main():
                            help="문구 교체 — run 경계를 넘는 텍스트도 잡음")
     p_rep.add_argument("input")
     p_rep.add_argument("output")
+    p_rep.add_argument("--allow-unmatched", action="store_true",
+                       dest="allow_unmatched",
+                       help="일부 키가 안 맞아도 계속 진행(기본: 하나라도 안 맞으면 실패)")
     p_rep.add_argument("--map", required=True,
                        help='{"옛 문구": "새 문구"} JSON 파일 경로')
 
@@ -4797,11 +4832,26 @@ def main():
                 return 1
             counts, modified = replace_hwpx(args.input, args.output, mapping)
             total = sum(counts.values())
+            not_found = [k for k, v in counts.items() if v == 0]
+            ok = total > 0 and not not_found
             _print({"input": args.input, "output": args.output,
                     "replaced": counts, "total": total,
-                    "not_found": [k for k, v in counts.items() if v == 0],
-                    "modified_entries": modified, "ok": total > 0})
-            return 0 if total > 0 else 2
+                    "not_found": not_found,
+                    "modified_entries": modified, "ok": ok})
+            # 못 찾은 키를 조용히 넘기면 원본 문구가 그대로 남은 채 배포된다.
+            # 원인(혼동문자·문단합침 등)을 즉시 진단해 보여주고 실패로 끝낸다.
+            if not_found and not getattr(args, "allow_unmatched", False):
+                print("\n[치환 실패] 아래 키를 문서에서 찾지 못했다 — "
+                      "원본 문구가 그대로 남는다.", file=sys.stderr)
+                try:
+                    _diagnose_unmatched(args.input, mapping, not_found)
+                except Exception as exc:            # 진단 실패해도 차단은 유지
+                    print(f"  (자동 진단 불가: {exc})", file=sys.stderr)
+                print("  고친 뒤 map_preflight.py check 로 '전부 매칭'을 확인하고 "
+                      "다시 실행하라.\n  의도적으로 무시하려면 --allow-unmatched.",
+                      file=sys.stderr)
+                return 2
+            return 0 if (ok or total > 0) else 2
 
         if args.command == "add-row":
             rows_values = load_values(args.rows)

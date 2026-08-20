@@ -9,6 +9,20 @@ HWP/HWPX 문서 변환·생성·읽기·편집을 위한 Claude 스킬. Windows�
 
 > ⭐ **이 스킬이 도움이 되셨다면 [GitHub에서 Star](https://github.com/jkf87/hwpx-skill)를 눌러주세요!** 한글 문서 자동화가 필요한 다른 분들에게도 닿을 수 있게 도와주세요.
 
+## 치환 게이트 (v1.10.0)
+
+레퍼런스 양식을 복제해 문구를 바꿀 때는 `scripts/map_preflight.py` 로
+사전검증하고, 산출물은 원본과 대조해 잔재가 없는지 확인한다.
+
+```bash
+python3 scripts/map_preflight.py dump    base.hwpx          # 키를 문서에서 뽑기
+python3 scripts/map_preflight.py check   base.hwpx --map map.json
+python3 scripts/fill_hwpx.py    replace  base.hwpx out.hwpx --map map.json
+python3 scripts/map_preflight.py residue out.hwpx --against base.hwpx
+```
+
+`replace` 는 못 찾은 키가 하나라도 있으면 실패한다(`--allow-unmatched` 로 해제).
+
 ## 기능
 
 | 워크플로우 | 설명 |
