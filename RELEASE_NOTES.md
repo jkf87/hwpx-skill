@@ -1,61 +1,50 @@
-# v1.10.0 — 치환 사전검증·잔재 대조 게이트 (2026-08-21)
+# v1.11.0 — government(관공서) 템플릿 제거 (2026-08-21)
 
-레퍼런스 양식(행안부 계획서·보도자료 등)을 복제해 문구를 바꾸는 작업에서
-**치환이 조용히 실패해 원본 부처 문구가 그대로 남은 채 배포되던 사고**를
-막는 게이트를 추가했습니다.
+컬러 배너·섹션 바로 관공서 문서를 "흉내내는" `government` 템플릿을 제거했습니다.
+정부 양식 문서는 실제 부처 문서를 복제하는 경로(`gyehoek.py`, `bodojaryo.py`,
+`gonmun.py`)가 훨씬 정확하므로, 합성 템플릿을 유지할 이유가 없습니다.
 
-## 왜 필요했나 (실측)
+## ⚠️ 제거된 것 (BREAKING)
 
-`assets/gyehoek-reference.hwpx` 를 전수 조사한 결과, 사람이 눈으로 보고 키를
-타이핑하는 방식은 구조적으로 실패합니다.
+- `templates/government/` (header.xml, section0.xml) 삭제
+  → `build_hwpx.py --template government` 을 더 이상 쓸 수 없습니다.
+- `scripts/hwpx_helpers.py` 에서 government 전용 함수 제거
+  - `make_cover_banner()` — 3×2 컬러 표지 배너
+  - `make_section_bar()` — 1×3 컬러 섹션 바
+  - `make_cover_page()` — 위 두 함수에 의존하던 표지 조립
+  - `validate_header_for_government()`
+  - 나머지 함수(`make_first_para`·`make_body_para`·`make_image_para` 등)는
+    그대로입니다. 다만 charPr/paraPr 기본값은 예시일 뿐이니 사용하는 템플릿의
+    ID 를 인자로 넘기세요.
 
-- `‧`(U+2027) **89회** 와 `·`(U+00B7) **86회** 가 섞여 있습니다. 화면에서
-  구별할 수 없어, 텍스트를 보고 옮겨 적으면 약 절반이 빗나갑니다.
-- 글머리표가 사설영역(PUA) 문자입니다(U+F02B1 등 **21개**). 복사 과정에서
-  유실되기 쉽습니다.
-- **28개 문단**에 `<hp:fwSpace/>`·`<hp:tab/>`·`<hp:lineBreak/>` 가 있고,
-  `<hp:t>` 사이에 낀 것은 문구를 쪼갭니다. 매처는 `<hp:t>` 텍스트만
-  이어붙이므로 그 경계를 넘는 키는 매칭되지 않습니다.
-- 눈으로 한 줄로 보이는 것이 실제로는 별개 문단 2~3개인 경우가 있습니다.
+### 대신 이렇게 하세요
 
-이 실패들은 전부 `not_found` 로만 조용히 보고되어, 부분 치환된 문서가 그대로
-전달되곤 했습니다. 실제 사례에서 330여 문단 중 **215~255개가 원본 그대로**
-남은 산출물이 "잔재 0건 검증 통과" 로 보고된 적이 있습니다. 하드코딩한 단어
-목록으로 grep 하는 검증 방식으로는 구조적으로 잡히지 않기 때문입니다.
+| 만들려는 것 | 사용할 것 |
+|---|---|
+| 정부·공공기관 추진계획서 | `scripts/gyehoek.py` (행안부 업무계획 복제) |
+| 정부 표준 보도자료 | `scripts/bodojaryo.py` |
+| 행안부 표준 기안문 | `scripts/gonmun.py` (별지 제1호서식) |
+| 일반 보고서·마크다운 문서 | `scripts/md2hwpx.py`, `build_hwpx.py --template report` |
 
-## 추가 — `scripts/map_preflight.py`
+## K-Teacher 활동지 변환은 그대로 동작합니다
 
-```bash
-# 키를 손으로 타이핑하지 말고, 매처와 같은 방식으로 문서에서 뽑는다
-python3 scripts/map_preflight.py dump  <file.hwpx> [--grep 검색어]
+`scripts/html2hwpx.py` 가 스타일 원본으로 government header 를 읽고 있었습니다.
+이를 **기존 활동지 양식**(`assets/problem-answer-reference.hwpx`)의 header 로
+옮겼습니다. 두 자산 모두 **맑은 고딕**을 같은 크기로 담고 있어 결과물의 글꼴과
+디자인은 이전과 동일합니다(변환 결과 K-Teacher 스타일 14개 charPr 전부 맑은 고딕
+유지 확인).
 
-# replace 전에 검증한다. 못 맞출 키는 원인과 교정안을 제시한다
-python3 scripts/map_preflight.py check <file.hwpx> --map map.json [--fix fixed.json]
+- 글꼴 원본 charPr 를 ID 고정(`id='8'`) 대신 **글꼴 이름으로 조회**하도록 바꿔,
+  원본 자산이 바뀌어도 깨지지 않습니다.
 
-# 맵에 넣지 않은 문단에 원본이 남았는지 원본과 직접 대조한다
-python3 scripts/map_preflight.py residue <out.hwpx> --against <base.hwpx> [--ignore ...]
-```
+## 문서
 
-- `dump` 출력은 `<번호> TAB <OK|CTRL> TAB <문단텍스트>` 입니다. 마지막 탭 뒤
-  전체가 그대로 키이며, 메타데이터가 키를 오염시키지 않습니다.
-- `check` 는 실패 키를 **혼동문자 불일치 / 문단합침 / 미발견** 으로 분류하고
-  실제 원문을 제시합니다. `--fix` 로 교정된 맵을 저장할 수 있습니다.
-- `residue` 는 산출물과 레퍼런스를 문단 단위로 대조합니다. 단어 목록에
-  의존하지 않으므로 "치환하기로 한 적 없는" 누락까지 잡습니다.
+- `SKILL.md` 워크플로우 A 에서 government 전제를 걷어냈습니다. 마크다운 한 편은
+  `md2hwpx.py`, 문단을 직접 조립해야 할 때만 `hwpx_helpers.py` 를 쓰도록 정리.
+- `README.md`, `references/template-styles.md` 의 government 항목 제거.
 
-## ⚠️ 동작 변경 — `fill_hwpx.py replace`
+## 검증
 
-**하나라도 못 찾은 키가 있으면 이제 실패합니다(exit 2).** 이전에는 일부만
-치환돼도 exit 0 이라, 부분 치환 결과가 성공으로 취급되어 그대로 배포됐습니다.
-
-- 차단될 때 원인을 자동 진단해 stderr 로 출력합니다(교정안 포함).
-- 응답 JSON 의 `ok` 는 이제 `총 치환 > 0 이고 not_found 가 비어 있음` 입니다.
-- 종전처럼 부분 매칭을 허용하려면 **`--allow-unmatched`** 를 명시하세요.
-
-기존 스크립트가 부분 매칭에 의존하고 있었다면 이 플래그를 붙여야 합니다.
-
-## 문서 / 테스트
-
-- `SKILL.md` 에 "치환 게이트" 절을 추가했습니다(배포 전 필수 게이트 앞).
-- `tests/test_map_preflight.py` 15개 케이스를 추가했습니다. 위 실패 유형과
-  `--allow-unmatched` 동작을 회귀로 고정합니다.
+- 테스트 21개 파일 전부 통과(`test_html2hwpx` 포함).
+- 계획서·보도자료·기안문·활동지·마크다운 생성 경로를 실제로 돌려 산출물이
+  `fill_hwpx.py check --strict` 를 통과하는 것까지 확인했습니다.

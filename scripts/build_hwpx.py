@@ -45,7 +45,7 @@ TEMPLATES_DIR = SKILL_DIR / "templates"
 BASE_DIR = TEMPLATES_DIR / "base"
 
 # templates/ 하위의 실제 디렉터리를 동적으로 인식(base 제외).
-# 하드코딩 목록은 government/proposal/gonmun2025 등 신규 템플릿을 누락시켰음.
+# 하드코딩 목록은 proposal/gonmun2025 등 새로 추가된 템플릿을 누락시켰음.
 AVAILABLE_TEMPLATES = sorted(
     p.name for p in TEMPLATES_DIR.iterdir()
     if p.is_dir() and p.name != "base"

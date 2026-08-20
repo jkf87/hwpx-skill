@@ -277,7 +277,6 @@ hwpx-skill/
 │   ├── gonmun/                 # 공문
 │   ├── minutes/                # 회의록
 │   ├── proposal/               # 제안서
-│   └── government/             # 관공서 (컬러 배너/섹션 바)
 ├── assets/                     # 레퍼런스 템플릿
 └── references/                 # 기술 문서
 ```

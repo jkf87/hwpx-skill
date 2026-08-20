@@ -383,6 +383,24 @@ def _append_char_style(parent: etree._Element, source: etree._Element, *, text_c
     return new_id
 
 
+def _find_char_by_font(tree: etree._ElementTree, char_parent, face: str):
+    """지정한 한글 글꼴을 참조하는 첫 charPr 를 찾는다(없으면 None)."""
+    ids = {
+        font.get("id")
+        for group in tree.findall(".//hh:fontfaces/hh:fontface", NS)
+        if group.get("lang") == "HANGUL"
+        for font in group.findall("hh:font", NS)
+        if font.get("face") == face
+    }
+    if not ids:
+        return None
+    for char_pr in char_parent.findall("hh:charPr", NS):
+        ref = char_pr.find("hh:fontRef", NS)
+        if ref is not None and ref.get("hangul") in ids:
+            return char_pr
+    return None
+
+
 def customize_header(source: Path, output: Path) -> ThemeStyles:
     """Append the K-Teacher worksheet palette and semantic styles."""
     tree = etree.parse(str(source))
@@ -391,13 +409,15 @@ def customize_header(source: Path, output: Path) -> ThemeStyles:
     if border_parent is None or char_parent is None:
         raise ValueError("header.xml is missing borderFills or charProperties")
     border_source = border_parent.find("hh:borderFill[@id='4']", NS)
-    # charPr 8 in the government template is Malgun Gothic. Reusing its font
-    # references keeps the visual language modern and portable on school PCs.
-    dark_source = char_parent.find("hh:charPr[@id='8']", NS)
-    title_source = char_parent.find("hh:charPr[@id='8']", NS)
-    hero_source = char_parent.find("hh:charPr[@id='8']", NS)
-    if border_source is None or dark_source is None or title_source is None or hero_source is None:
-        raise ValueError("government header does not contain required base styles")
+    # 맑은 고딕을 참조하는 charPr 를 글꼴 원본으로 삼는다. 학교 PC 에서
+    # 안정적으로 렌더되는 현대적 산세리프라 활동지에 적합하다.
+    # ID 를 고정하지 않고 글꼴 이름으로 찾으므로, 원본 자산이 바뀌어도 버틴다.
+    base_source = _find_char_by_font(tree, char_parent, "맑은 고딕")
+    if base_source is None:                       # 없으면 첫 charPr 로 폴백
+        base_source = char_parent.find("hh:charPr", NS)
+    dark_source = title_source = hero_source = base_source
+    if border_source is None or base_source is None:
+        raise ValueError("worksheet header does not contain required base styles")
 
     all_line = {
         name: (KTEACHER_PALETTE["line"], "0.2 mm")
@@ -897,7 +917,10 @@ def convert(
     creator: str = "",
 ) -> tuple[Path, Path]:
     output_hwpx.parent.mkdir(parents=True, exist_ok=True)
-    source_header = SKILL_DIR / "templates" / "government" / "header.xml"
+    # 스타일 원본은 기존 활동지 양식(문제지·답안지 레퍼런스)의 header 를 쓴다.
+    # 예전에는 templates/government/header.xml 을 썼으나, 관공서 템플릿을
+    # 제거하면서 같은 글꼴(맑은 고딕)을 가진 활동지 자산으로 옮겼다.
+    worksheet_ref = SKILL_DIR / "assets" / "problem-answer-reference.hwpx"
     reference_hwpx = SKILL_DIR / "assets" / "gyehoek-reference.hwpx"
     if not reference_hwpx.is_file():
         reference_hwpx = SKILL_DIR / "assets" / "report-template.hwpx"
@@ -909,6 +932,10 @@ def convert(
     plan_xml = work / "design-plan.xml"
     header_xml = work / "header.xml"
     section_xml = work / "section0.xml"
+
+    source_header = work / "source-header.xml"
+    with zipfile.ZipFile(worksheet_ref) as zf:
+        source_header.write_bytes(zf.read("Contents/header.xml"))
 
     plan = parse_html(input_html)
     write_plan_xml(plan, plan_xml)

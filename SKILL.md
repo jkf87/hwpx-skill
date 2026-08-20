@@ -43,7 +43,6 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── gonmun2025/            # ★ 행정안전부 표준 기안문 별지 제1호서식 (맑은 고딕 11.5pt)
 │   ├── minutes/               # 회의록
 │   ├── proposal/              # 제안서
-│   └── government/            # ★ 관공서 (컬러 섹션 바/표지 배너)
 ├── assets/
 │   ├── report-template.hwpx
 │   ├── gyehoek-reference.hwpx       # ★ 공공기관 계획서 기본양식(행안부 2025 업무계획) — gyehoek.py가 복제
@@ -224,9 +223,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/html2hwpx.py" input.html output.hwpx \
 
 > **마크다운·텍스트·URL → 구조화된 HWPX 문서. 이 워크플로우가 핵심.**
 
-> **⚠️ md2hwpx.py를 직접 실행하지 마라.** md2hwpx.py는 base/report 템플릿만 지원하며,
-> government 템플릿의 컬러 배너·섹션 바·표지 페이지를 생성할 수 없다.
-> **반드시 `hwpx_helpers.py`를 import하고 아래 흐름을 따른다.**
+> 마크다운 한 편을 그대로 문서로 만들 때는 `md2hwpx.py` 가 가장 빠르다.
+> 표지·배너처럼 문단을 직접 조립해야 하는 구조가 필요하면 `hwpx_helpers.py` 를
+> import 해 아래 흐름을 따른다.
 
 ### 전체 흐름
 
@@ -234,7 +233,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/html2hwpx.py" input.html output.hwpx \
 [1] 소스 자료 읽기
 [2] 구조 파싱 (제목, 섹션, 본문, 이미지)
 [3] 템플릿 선택 → 해당 템플릿의 스타일 ID만 사용 (references/template-styles.md)
-    ⚠️ 템플릿 간 ID는 호환되지 않음! government charPr를 report에 쓰면 깨짐
+    ⚠️ 템플릿 간 ID는 호환되지 않음! report charPr를 base에 쓰면 깨짐
 [4] hwpx_helpers.py를 import하여 Python 빌드 스크립트 작성
 [5] build_hwpx.py로 .hwpx 조립
 [6] 이미지가 있으면 add_images_to_hwpx() + update_content_hpf()
@@ -242,8 +241,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/html2hwpx.py" input.html output.hwpx \
 [8] validate.py 검증
 ```
 
-> **올바른 방식**: `from hwpx_helpers import *` → `make_cover_page()` → `make_section_bar()` → `make_body_para()`
-> **잘못된 방식**: `python3 md2hwpx.py input.md` (컬러 배너·섹션 바 없음, 기본 스타일만 적용)
+> 사용 예: `from hwpx_helpers import *` → `make_first_para()` → `make_body_para()` → `make_image_para()`
 
 ### section0.xml 핵심 규칙
 
@@ -259,9 +257,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/html2hwpx.py" input.html output.hwpx \
 ```bash
 # 1. section0.xml을 임시 파일로 작성 (Python 스크립트로 생성)
 
-# 2. 빌드 (government 템플릿 사용 시)
+# 2. 빌드 (예: report 템플릿)
 python3 "${CLAUDE_SKILL_DIR}/scripts/build_hwpx.py" \
-  --header "${CLAUDE_SKILL_DIR}/templates/government/header.xml" \
+  --template report \
   --section /tmp/section0.xml \
   --title "문서 제목" \
   --output result.hwpx
@@ -287,10 +285,6 @@ SKILL_DIR = Path("${CLAUDE_SKILL_DIR}")
 REF_HWPX = SKILL_DIR / "assets" / "gyehoek-reference.hwpx"
 OUTPUT = Path("output.hwpx")
 
-# 0. government header 검증 (잘못된 header 사용 방지)
-GOV_HEADER = SKILL_DIR / "templates/government/header.xml"
-validate_header_for_government(GOV_HEADER)
-
 # 1. secPr 추출
 secpr, colpr = extract_secpr_and_colpr(REF_HWPX)
 
@@ -299,10 +293,8 @@ parts = []
 parts.append(f'<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>')
 parts.append(f'<hs:sec {NS_DECL}>')
 parts.append(make_first_para(secpr, colpr))
-parts.extend(make_cover_page("문서 제목", subtitle="(부제)", date="2026. 3."))
-parts.append(make_cover_banner("문서 제목"))  # 본문 페이지 배너
+parts.append(make_text_para("문서 제목", charpr="7", parapr="20"))
 parts.append(make_empty_line())
-parts.append(make_section_bar("1", "섹션 제목"))
 parts.append(make_body_para("가.", "본문 내용"))
 parts.append(f'</hs:sec>')
 section_xml = "\n".join(parts)
@@ -310,7 +302,7 @@ section_xml = "\n".join(parts)
 # 3. 빌드
 Path("/tmp/section0.xml").write_text(section_xml, encoding="utf-8")
 subprocess.run(["python3", str(SKILL_DIR/"scripts/build_hwpx.py"),
-    "--header", str(SKILL_DIR/"templates/government/header.xml"),
+    "--template", "report",
     "--section", "/tmp/section0.xml", "--output", str(OUTPUT)], check=True)
 
 # 4. (이미지 있으면) add_images_to_hwpx() + update_content_hpf()
@@ -326,16 +318,12 @@ subprocess.run(["python3", str(SKILL_DIR/"scripts/validate.py"), str(OUTPUT)])
 |------|------|
 | `next_id()` | 고유 ID 생성 |
 | `xml_escape(text)` | XML 특수문자 이스케이프 |
-| `validate_header_for_government(path)` | header.xml이 government용인지 검증 (크기·charPr 수 체크) |
 | `extract_secpr_and_colpr(hwpx)` | HWPX에서 secPr+colPr 추출 |
 | `make_first_para(secpr, colpr)` | 첫 문단 (secPr 포함) |
 | `make_empty_line()` | 빈 줄 |
 | `make_page_break()` | 페이지 넘김 |
 | `make_text_para(text, charpr, parapr)` | 텍스트 문단 |
 | `make_body_para(marker, text)` | 본문 (마커+내용) |
-| `make_cover_banner(title)` | 표지 배너 (3×2 컬러 테이블) |
-| `make_section_bar(number, title)` | 섹션 바 (1×3 컬러 테이블) |
-| `make_cover_page(title, subtitle, date)` | 표지 전체 + pageBreak |
 | `make_image_para(binary_item_id, w, h)` | 이미지 (전체 hp:pic 구조) |
 | `add_images_to_hwpx(path, images)` | ZIP에 이미지 추가 |
 | `update_content_hpf(path, images)` | content.hpf에 이미지 등록 |
@@ -1252,8 +1240,8 @@ subprocess.run(["python3", f"{SKILL_DIR}/scripts/fix_namespaces.py", "output.hwp
 9. **XML 이스케이프**: `<>&"` 반드시 이스케이프
 10. **ID 고유성**: 모든 문단 id는 문서 내 고유
 11. **이미지**: `<hp:pic>` 필수 구조 준수 → [xml-structure.md](references/xml-structure.md)
-12. **템플릿 ID 호환 불가**: government charPr/paraPr/borderFill ID를 report/base 등 다른 템플릿에 사용하면 깨짐. 반드시 해당 템플릿의 ID만 사용. base charPr 3은 "16pt 제목"이 아니라 "9pt 각주"임에 주의
-13. **hwpx_helpers.py 사용 필수**: md2hwpx.py 직접 실행 금지. 반드시 `from hwpx_helpers import *`로 함수를 사용하여 빌드 스크립트를 작성할 것. md2hwpx.py는 government 템플릿(컬러 배너/섹션 바)을 지원하지 않음
+12. **템플릿 ID 호환 불가**: 한 템플릿의 charPr/paraPr/borderFill ID를 다른 템플릿에 사용하면 깨짐. 반드시 해당 템플릿의 ID만 사용. base charPr 3은 "16pt 제목"이 아니라 "9pt 각주"임에 주의
+13. **조립이 필요하면 hwpx_helpers.py**: 마크다운 한 편이면 md2hwpx.py 로 충분하다. 표지·배너처럼 문단을 직접 짜야 할 때만 `from hwpx_helpers import *` 로 빌드 스크립트를 작성한다
 14. **양식 복제 시 Workflow F 필수**: 사용자가 `.hwpx` 양식을 제공하고 내용 변경을 요청하면 `clone_form.py` 사용. 절대로 `<hp:t>` 노드를 순차 덮어쓰기하거나 lxml로 텍스트를 직접 조작하지 말 것 (런 소실·서식 파괴 원인)
 15. **서브에이전트 검수 권장**: 문서 생성 후 별도 서브에이전트로 `validate.py` + `text_extract.py` + 구조 비교를 실행하여 품질 검증
 16. **Remove line caches after edits**: run `finalize_hwpx.py --strip-linesegarray` after XML/text replacement.
