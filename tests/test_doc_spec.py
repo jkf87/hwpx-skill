@@ -309,6 +309,19 @@ def main():
     check(run(FILL, "check", outb2, "--strict").returncode == 0,
           "대체 조판 결과도 strict 통과")
 
+    # ── 템플릿에 페이지 설정이 딸려오지 않는가 ──
+    # 한컴은 제목 배너를 secPr 이 든 첫 문단에 넣기도 한다. 그 블록을 배너
+    # 템플릿으로 그대로 뽑으면 조판 결과에 secPr 이 두 번 들어가 제목이
+    # 안 보이거나 앞에 빈 쪽이 생긴다.
+    for tf in (spec_dir / "templates").glob("*.xml"):
+        if tf.name == "first_para.xml":
+            continue
+        body = tf.read_text(encoding="utf-8")
+        check("<hp:secPr" not in body, f"{tf.name} 에 페이지 설정이 없음")
+    sec_all = section_of(out)
+    check(sec_all.count("<hp:secPr") == 1,
+          f"조판 결과의 페이지 설정은 1개 (실제 {sec_all.count('<hp:secPr')})")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

@@ -76,6 +76,20 @@ def iter_blocks(inner: str):
         pos = end
 
 
+SECPR_RE = re.compile(r"<hp:secPr\b.*?</hp:secPr>", re.S)
+COLPR_RE = re.compile(r"<hp:ctrl>\s*<hp:colPr\b.*?</hp:ctrl>", re.S)
+
+
+def strip_page_setup(frag: str) -> str:
+    """조각에서 페이지 설정을 떼어낸다.
+
+    한컴은 제목 배너를 secPr 이 든 첫 문단에 함께 넣기도 한다. 그 블록을
+    배너 템플릿으로 그대로 뽑으면 조판 결과에 secPr 이 두 번 들어가
+    문서가 어긋난다(실측: 제목이 안 보이거나 앞에 빈 쪽이 생김).
+    """
+    return COLPR_RE.sub("", SECPR_RE.sub("", frag))
+
+
 def classify(text: str) -> str:
     s = text.lstrip()
     for name, alts in MARKERS:
@@ -117,7 +131,9 @@ def analyze(ref: Path, outdir: Path) -> dict:
     # 첫 문단이 secPr 과 '원본 제목 배너' 를 함께 담고 있는 문서가 있다
     # (한컴은 제목 표를 첫 문단 안에 넣기도 한다). 그대로 두면 조판하는 모든
     # 문서에 원본 제목이 딸려 들어간다. 페이지 설정만 남기고 개체는 뗀다.
-    if "<hp:secPr" in first and ("<hp:tbl" in first or "<hp:pic" in first):
+    spec["page_has_object"] = ("<hp:secPr" in first
+                               and ("<hp:tbl" in first or "<hp:pic" in first))
+    if spec["page_has_object"]:
         m = re.search(r'(<hp:p\b[^>]*>.*?<hp:secPr\b.*?</hp:secPr>.*?</hp:run>).*?(</hp:p>)', first, re.S)
         if m:
             first = m.group(1) + m.group(2)
@@ -175,7 +191,7 @@ def analyze(ref: Path, outdir: Path) -> dict:
         name = f"banner_{shape}_{cells}"
         if name not in spec["banners"]:
             fn = f"{name}.xml"
-            (tpl / fn).write_text(frag, encoding="utf-8")
+            (tpl / fn).write_text(strip_page_setup(frag), encoding="utf-8")
             spec["banners"][name] = {"template": fn, "shape": shape,
                                      "cells": cells, "example": txt}
 
@@ -196,12 +212,13 @@ def analyze(ref: Path, outdir: Path) -> dict:
             key, bucket = f"table_{cols}col", spec["tables"]
         if key not in bucket:
             fn = f"{key}.xml"
-            (tpl / fn).write_text(frag, encoding="utf-8")
+            (tpl / fn).write_text(strip_page_setup(frag), encoding="utf-8")
             bucket[key] = {"template": fn, "rows": rows, "cols": cols,
                            "cells": cells, "example": txt[:80]}
 
     if images:
-        (tpl / "image.xml").write_text(images[0], encoding="utf-8")
+        (tpl / "image.xml").write_text(strip_page_setup(images[0]),
+                                       encoding="utf-8")
         spec["objects"]["image"] = {"template": "image.xml", "count": len(images)}
 
     # 본문 폭 = 가장 넓은 표의 폭. 배너 폭을 다시 계산할 때 상한으로 쓴다.
@@ -398,6 +415,20 @@ def fill_cell_paragraphs(frag: str, cell_idx: int, lines: list,
         or set_text(proto, "")
     new_cell = cell[:inner_paras[0][0]] + built + cell[inner_paras[-1][1]:]
     return frag[:st] + new_cell + frag[en:]
+
+
+def merge_into_first(first_para: str, banner: str) -> str:
+    """표지 배너를 페이지 설정 문단 안으로 넣는다(원본 구조 재현)."""
+    inner = re.search(r"<hp:p\b[^>]*>(.*)</hp:p>", banner, re.S)
+    if not inner:
+        return first_para + banner
+    body = inner.group(1)          # 배너의 <hp:run> 들
+    idx = first_para.rfind("</hp:p>")
+    if idx < 0:
+        return first_para + banner
+    # 반드시 '별도 run' 으로 붙인다. secPr 이 든 run 안에 넣으면 한컴이
+    # 표를 그리지 않는다(실측 — 제목이 통째로 안 보였다).
+    return first_para[:idx] + body + first_para[idx:]
 
 
 def page_break() -> str:
@@ -646,8 +677,15 @@ def render(specdir: Path, content: Path, out: Path,
             # 레퍼런스에 그 서식이 없으면 버리지 말고 문단으로라도 살린다.
             # 조용히 건너뛰면 제목·장·절이 통째로 사라진다(실측).
             if cover_t:
-                parts.append(fill_cells(T(cover_t), [None, b["title"], None],
-                                        bold_map))
+                banner = fill_cells(T(cover_t), [None, b["title"], None],
+                                    bold_map)
+                if spec.get("page_has_object") and parts and not cover_page:
+                    # 원본이 페이지 설정과 제목 배너를 '한 문단'에 담고 있었다면
+                    # 그 구조를 그대로 되살린다. 빈 문단 + 별도 배너로 쪼개면
+                    # 한컴이 앞에 빈 쪽을 만드는 경우가 있다(실측).
+                    parts[0] = merge_into_first(parts[0], banner)
+                else:
+                    parts.append(banner)
             else:
                 parts.append(para("plain", b["title"]))
                 fallbacks[t] += 1
