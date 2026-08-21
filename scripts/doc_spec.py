@@ -231,6 +231,22 @@ def esc(t: str) -> str:
 EMPH = re.compile(r"\*\*(.+?)\*\*")
 
 
+def build_char_heights(base: Path) -> dict:
+    """charPr id → 글자 크기(HWPUNIT). 폭·줄수 어림에 쓴다."""
+    from xml.etree import ElementTree as ET
+    ns = {"hh": "http://www.hancom.co.kr/hwpml/2011/head"}
+    with zipfile.ZipFile(base) as z:
+        root = ET.fromstring(z.read("Contents/header.xml"))
+    return {c.get("id"): int(c.get("height") or 1000)
+            for c in root.findall(".//hh:charProperties/hh:charPr", ns)}
+
+
+def first_char_height(frag: str, heights: dict, default: int = 1000) -> int:
+    """조각의 첫 run 이 쓰는 글자 크기."""
+    m = re.search(r'charPrIDRef="(\d+)"', frag)
+    return heights.get(m.group(1), default) if m else default
+
+
 def build_bold_map(base: Path) -> dict:
     """charPr → '같은 글꼴의 굵게 charPr' 대응표.
 
@@ -427,17 +443,23 @@ def make_image(proto: str, item_id: str, px_w: int, px_h: int,
     return out
 
 
-def text_width(text: str) -> int:
-    """제목 한 줄이 차지할 대략적인 폭(HWPUNIT).
+CELL_PAD = 800          # 셀 좌우 여백 여유(HWPUNIT)
 
-    레퍼런스 배너에서 역산한 값 — 한글 한 자 ≈ 2200, 영문/숫자 ≈ 1100,
-    좌우 여백 4000. 눈금이 아니라 '한 줄에 들어가게' 잡기 위한 근사치다.
+
+def text_width(text: str, char_h: int = 2000) -> int:
+    """글 한 줄이 차지할 대략적인 폭(HWPUNIT).
+
+    한글 한 자의 자폭은 대략 글자 크기(1em)와 같고, 영문·숫자는 그 절반이다.
+    글자 크기를 인자로 받는 게 핵심 — 배너(큰 글꼴)와 표 본문(작은 글꼴)에
+    같은 상수를 쓰면 표 높이가 몇 배로 부풀려진다(실측).
     """
     korean = sum(1 for c in text if ord(c) > 0x7F)
-    return korean * 2200 + (len(text) - korean) * 1100 + 4000
+    ascii_n = len(text) - korean
+    return round(korean * char_h + ascii_n * char_h * 0.5) + CELL_PAD
 
 
-def widen_banner(frag: str, title_cell: int, title: str, body_width: int) -> str:
+def widen_banner(frag: str, title_cell: int, title: str, body_width: int,
+                 heights: dict | None = None) -> str:
     """배너의 제목 칸을 제목 길이에 맞게 넓힌다.
 
     배너 템플릿의 칸 폭은 '원본 제목 길이'에 맞춰 굳어 있다(실측: 절 배너의
@@ -452,7 +474,9 @@ def widen_banner(frag: str, title_cell: int, title: str, body_width: int) -> str
         m = re.search(r'<hp:cellSz width="(\d+)"', frag[st:en])
         widths.append(int(m.group(1)) if m else 0)
     others = sum(w for i, w in enumerate(widths) if i != title_cell)
-    want = max(widths[title_cell], text_width(title))
+    st0, en0 = cells[title_cell]
+    ch = first_char_height(frag[st0:en0], heights or {}, 2000)
+    want = max(widths[title_cell], text_width(title, ch))
     new_w = min(want, max(body_width - others, widths[title_cell]))
     if new_w == widths[title_cell]:
         return frag
@@ -532,6 +556,7 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
 
     bold_map = build_bold_map(base)
     body_w = spec.get("body_width", 0)
+    heights = build_char_heights(base)
 
     def para(kind: str, text: str) -> str:
         lv = spec["levels"].get(kind) or spec["levels"].get("plain")
@@ -563,10 +588,10 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
             parts.append(fill_cells(T(cover_t), [None, b["title"], None], bold_map))
         elif t == "chapter" and chap_t:
             frag = fill_cells(T(chap_t), [b["title"]], bold_map)
-            parts.append(widen_banner(frag, 0, b["title"], body_w))
+            parts.append(widen_banner(frag, 0, b["title"], body_w, heights))
         elif t == "section" and sect_t:
             frag = fill_cells(T(sect_t), [b["num"], None, b["title"]], bold_map)
-            parts.append(widen_banner(frag, 2, b["title"], body_w))
+            parts.append(widen_banner(frag, 2, b["title"], body_w, heights))
         elif t == "titled_box" and titled_t:
             frag = T(titled_t)
             cells = spans(frag, "tc")
@@ -576,7 +601,7 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
                                      for i in range(len(cells))], bold_map)
             parts.append(fill_cell_paragraphs(frag, body_idx, b["body"], bold_map))
         elif t == "table" and table_t and b["rows"]:
-            parts.append(build_table(T(table_t), b["rows"], bold_map))
+            parts.append(build_table(T(table_t), b["rows"], bold_map, heights))
         elif t == "image":
             obj = spec.get("objects", {}).get("image")
             src = (content.parent / b["path"]).expanduser()
@@ -614,7 +639,8 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
             "images": [i for i, _ in new_images]}
 
 
-def build_table(frag: str, rows: list, bold_map: dict | None = None) -> str:
+def build_table(frag: str, rows: list, bold_map: dict | None = None,
+                heights: dict | None = None) -> str:
     """표를 내용 크기(행×열)에 맞춰 다시 조립한다.
 
     원본 일정표는 '분야' 라벨 칸이 세로 병합돼 있다. 그 행을 그대로 복제하면
@@ -654,8 +680,32 @@ def build_table(frag: str, rows: list, bold_map: dict | None = None) -> str:
         total_w = int(sz.group(1))
     cell_w = total_w // ncol if total_w else 0
 
-    def make_cell(proto, text, col, row):
+    proto_h = 0
+    m_h = re.search(r'<hp:cellSz width="\d+" height="(\d+)"', body_proto or "")
+    if m_h:
+        proto_h = int(m_h.group(1))
+
+    body_ch = first_char_height(body_proto or "", heights or {}, 1000)
+    line_adv = round(body_ch * 1.7)          # 줄간격 포함 한 줄 이동량
+
+    def cell_height(n_lines: int) -> int:
+        return proto_h + max(0, n_lines - 1) * line_adv
+
+    def lines_needed(text: str) -> int:
+        """칸 폭에 견줘 몇 줄이 될지 어림한다."""
+        if not text or not cell_w:
+            return 1
+        usable = max(cell_w - CELL_PAD, 1000)
+        return max(1, -(-(text_width(text, body_ch) - CELL_PAD) // usable))
+
+    def make_cell(proto, text, col, row, row_lines):
         c = set_text(proto, text, bold_map)
+        if proto_h:
+            # 원본 한 줄 높이(여백 포함)에 '추가 줄'만큼 줄간격을 더한다.
+            # 한 줄 높이를 줄 수만큼 곱하면 여백이 줄마다 중복돼 칸이 과하게
+            # 커진다(실측: 4줄짜리가 45mm → 실제 필요한 건 27mm 남짓).
+            c = re.sub(r'(<hp:cellSz width="\d+" height=")\d+(")',
+                       rf'\g<1>{cell_height(row_lines)}\g<2>', c, count=1)
         c = re.sub(r'<hp:cellAddr colAddr="\d+" rowAddr="\d+"/>',
                    f'<hp:cellAddr colAddr="{col}" rowAddr="{row}"/>', c)
         c = re.sub(r'<hp:cellSpan colSpan="\d+" rowSpan="\d+"/>',
@@ -664,15 +714,23 @@ def build_table(frag: str, rows: list, bold_map: dict | None = None) -> str:
             c = re.sub(r'(<hp:cellSz width=")\d+(")', rf'\g<1>{cell_w}\g<2>', c)
         return c
 
-    built = []
+    built, total_h = [], 0
     for r_i, row in enumerate(rows):
         proto = head_proto if r_i == 0 else body_proto
+        # 한 행의 높이는 그 행에서 가장 많은 줄을 쓰는 칸에 맞춘다
+        row_lines = max((lines_needed(row[c] if c < len(row) else "")
+                         for c in range(ncol)), default=1)
+        total_h += cell_height(row_lines)
         cells = "".join(
-            make_cell(proto, row[c_i] if c_i < len(row) else "", c_i, r_i)
+            make_cell(proto, row[c_i] if c_i < len(row) else "", c_i, r_i,
+                      row_lines)
             for c_i in range(ncol))
         built.append(f"<hp:tr>{cells}</hp:tr>")
 
     new = frag[:trs[0][0]] + "".join(built) + frag[trs[-1][1]:]
+    if total_h:
+        new = re.sub(r'(<hp:sz width="\d+" widthRelTo="ABSOLUTE" height=")\d+(")',
+                     rf'\g<1>{total_h}\g<2>', new, count=1)
     new = re.sub(r'rowCnt="\d+"', f'rowCnt="{nrow}"', new, count=1)
     new = re.sub(r'colCnt="\d+"', f'colCnt="{ncol}"', new, count=1)
     return new
@@ -720,7 +778,103 @@ def cmd_render(a) -> int:
     r = render(Path(a.spec), Path(a.content), Path(a.out))
     print(f"조판 완료 → {r['out']}")
     print(f"  블록: {r['blocks']}")
+    q = lint_document(Path(a.out))          # 조판 직후 자동 검문
+    for e in q["errors"]:
+        print(f"  [오류] {e}", file=sys.stderr)
+    for w in q["warnings"][:10]:
+        print(f"  [경고] {w}", file=sys.stderr)
+    if q["errors"]:
+        print("  => 품질 검문 실패. 전달하지 마라.", file=sys.stderr)
+        return 2
     return 0
+
+
+
+# ─────────────────────────── 조판 품질 검문 ───────────────────────────
+
+def lint_document(path: Path) -> dict:
+    """조판 결과가 '내용에 맞게' 짜였는지 검사한다.
+
+    결정론(같은 입력 → 같은 바이트)은 품질을 보장하지 못한다. 지금까지 실제로
+    난 사고 셋은 모두 결정론적이었다 — 매번 똑같이 깨졌다. 그래서 레이아웃
+    자체를 검사한다. 전부 XML 에서 계산 가능한 것들이다.
+    """
+    head, inner, tail = load_section(path)
+    heights = build_char_heights(path)
+    errors, warns = [], []
+
+    if "<hp:linesegarray>" in inner:
+        errors.append("줄배치 캐시가 남아 있다 — 옛 레이아웃이 그대로 굳는다")
+    n_sq = inner.count('lineWrap="SQUEEZE"')
+    if n_sq:
+        errors.append(f"lineWrap=SQUEEZE {n_sq}곳 — 자간을 줄여 글자가 겹쳐 찍힌다")
+
+    body_w = max([int(m.group(1)) for m in
+                  re.finditer(r'<hp:sz width="(\d+)" widthRelTo="ABSOLUTE"', inner)]
+                 or [0])
+
+    for ts, te in spans(inner, "tbl"):
+        tbl = inner[ts:te]
+        rc = re.search(r'rowCnt="(\d+)" colCnt="(\d+)"', tbl)
+        if not rc:
+            continue
+        rows, cols = int(rc.group(1)), int(rc.group(2))
+        cells = spans(tbl, "tc")
+        merged = any(
+            (mm := re.search(r'colSpan="(\d+)" rowSpan="(\d+)"', tbl[cs:ce]))
+            and (mm.group(1) != "1" or mm.group(2) != "1")
+            for cs, ce in cells)
+        if not merged and len(cells) != rows * cols:
+            errors.append(f"표 {rows}x{cols} 인데 칸이 {len(cells)}개 "
+                          f"(있어야 할 {rows * cols}개) — 내용이 밀린다")
+        for cs, ce in cells:
+            cell = tbl[cs:ce]
+            txt = text_of(cell).strip()
+            sz = re.search(r'<hp:cellSz width="(\d+)" height="(\d+)"', cell)
+            if not sz or not txt:
+                continue
+            cw, chh = int(sz.group(1)), int(sz.group(2))
+            fh = first_char_height(cell, heights, 1000)
+            usable = max(cw - CELL_PAD, 1000)
+            need_lines = max(1, -(-(text_width(txt, fh) - CELL_PAD) // usable))
+            line_adv = round(fh * 1.7)
+            need_h = line_adv * need_lines
+            if chh < need_h * 0.75:
+                warns.append(f"칸이 낮다({chh / 283.5:.0f}mm, {need_lines}줄엔 "
+                             f"{need_h / 283.5:.0f}mm 필요): {txt[:24]!r}")
+            elif need_lines <= 2 and chh > need_h * 3 and chh > 40 * 283.5:
+                warns.append(f"칸이 지나치게 높다({chh / 283.5:.0f}mm, 내용 "
+                             f"{len(txt)}자) — 빈 박스가 된다: {txt[:24]!r}")
+            if body_w and cw > body_w * 1.02:
+                warns.append(f"칸 폭이 본문 폭을 넘는다({cw / 283.5:.0f}mm)")
+
+    for ps, pe in spans(inner, "pic"):
+        pic = inner[ps:pe]
+        m = re.search(r'<hp:sz width="(\d+)"', pic)
+        if m and body_w and int(m.group(1)) > body_w * 1.02:
+            warns.append(f"그림이 본문 폭을 넘는다({int(m.group(1)) / 283.5:.0f}mm)")
+
+    return {"file": str(path), "errors": errors, "warnings": warns,
+            "ok": not errors}
+
+
+def cmd_lint(a) -> int:
+    r = lint_document(Path(a.file))
+    if r["errors"]:
+        print(f"조판 품질 검문 실패 — 오류 {len(r['errors'])}건")
+        for e in r["errors"]:
+            print(f"  [오류] {e}")
+    if r["warnings"]:
+        print(f"경고 {len(r['warnings'])}건")
+        for w in r["warnings"][:20]:
+            print(f"  [경고] {w}")
+        if len(r["warnings"]) > 20:
+            print(f"  … 외 {len(r['warnings']) - 20}건")
+    if r["ok"] and not r["warnings"]:
+        print("조판 품질 검문 통과 — 레이아웃이 내용과 맞는다")
+    elif r["ok"]:
+        print("오류 없음(경고만) — 전달 가능")
+    return 0 if r["ok"] else 2
 
 
 def main() -> int:
@@ -735,6 +889,9 @@ def main() -> int:
     r.add_argument("content")
     r.add_argument("-o", "--out", required=True)
     r.set_defaults(fn=cmd_render)
+    q = sub.add_parser("lint", help="조판 결과의 레이아웃 품질 검문")
+    q.add_argument("file")
+    q.set_defaults(fn=cmd_lint)
     a = ap.parse_args()
     return a.fn(a)
 

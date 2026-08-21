@@ -198,6 +198,33 @@ def main():
     check(all(st[0] == 1980 for st in stamps),
           f"모든 엔트리의 압축 시각이 고정됨 {sorted(stamps)[:2]}")
 
+    # ── 조판 품질 검문 (결정론과 별개로 '품질'을 지키는 장치) ──
+    r = run(DS, "lint", out)
+    check(r.returncode == 0, "정상 산출물은 품질 검문 통과")
+    check("통과" in r.stdout or "오류 없음" in r.stdout, "검문 결과 문구 출력")
+
+    # 레퍼런스 원본은 SQUEEZE·줄배치 캐시가 있어 반드시 걸려야 한다
+    r = run(DS, "lint", REF)
+    check(r.returncode == 2, "결함 있는 문서는 검문에서 걸림(exit 2)")
+    check("SQUEEZE" in r.stdout, "글자 겹침 원인(SQUEEZE)을 지목")
+    check("줄배치 캐시" in r.stdout, "줄배치 캐시를 지목")
+
+    # 표 행 높이가 내용 줄 수에 맞게 늘어나는가
+    tall = tmp / "tall.md"
+    tall.write_text(
+        "# 표\n## Ⅰ. 장\n| 구분 | 내용 |\n| --- | --- |\n"
+        "| 짧음 | 한 줄 |\n"
+        "| 김 | " + ("아주 긴 설명이 이어지는 칸입니다 " * 4) + "|\n",
+        encoding="utf-8")
+    outt = tmp / "tall.hwpx"
+    check(run(DS, "render", spec_dir, tall, "-o", outt).returncode == 0,
+          "긴 칸 포함 표 조판됨")
+    sect = section_of(outt)
+    hs = [int(m.group(1)) for m in
+          re.finditer(r'<hp:cellSz width="\d+" height="(\d+)"', sect)]
+    check(len(set(hs)) > 1, "행 높이가 내용에 따라 달라짐(일괄 복제 아님)")
+    check(run(DS, "lint", outt).returncode == 0, "긴 칸 표도 품질 검문 통과")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
