@@ -557,7 +557,14 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
                 parts.append(para(kind, txt))
         used[t] += 1
 
-    section = head + renumber("".join(parts)) + tail
+    body = "".join(parts)
+    # 셀 줄바꿈을 BREAK 로 강제한다.
+    # 레퍼런스 셀 상당수가 lineWrap="SQUEEZE"(긴 글을 한 줄에 욱여넣으려 자간을
+    # 줄임)인데, 원본은 글이 짧아 티가 안 났다. 새 내용은 길이가 자유로우므로
+    # 그대로 두면 글자가 서로 겹쳐 찍힌다(실사용에서 발생). 짧은 글에서는
+    # BREAK 와 SQUEEZE 의 결과가 같으므로 손해가 없다.
+    body = body.replace('lineWrap="SQUEEZE"', 'lineWrap="BREAK"')
+    section = head + renumber(body) + tail
     build_package(base, out, section, new_images)
     return {"blocks": dict(used), "out": str(out),
             "images": [i for i, _ in new_images]}

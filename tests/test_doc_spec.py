@@ -102,6 +102,23 @@ def main():
     check(run(FILL, "check", out3, "--strict").returncode == 0,
           "초장문 결과가 strict 통과")
 
+    # ── 긴 셀 텍스트가 겹쳐 찍히지 않는가 (lineWrap SQUEEZE 사고) ──
+    wmd = tmp / "w.md"
+    wmd.write_text(
+        "# 표\n## Ⅰ. 장\n"
+        "| 분야 | 사업명 | 주요 내용 | 기대 효과 |\n| --- | --- | --- | --- |\n"
+        "| AI | AI Hub | " + ("국내 최대 AI 학습 데이터 통합 플랫폼 고도화 및 민간 개방 확대 ")
+        + "| 비용 절감 |\n", encoding="utf-8")
+    outw = tmp / "wrap.hwpx"
+    check(run(DS, "render", spec_dir, wmd, "-o", outw).returncode == 0,
+          "긴 셀 텍스트 표 조판됨")
+    secw = section_of(outw)
+    check('lineWrap="SQUEEZE"' not in secw,
+          "SQUEEZE 없음 — 있으면 자간을 줄여 글자가 겹쳐 찍힌다")
+    check('lineWrap="BREAK"' in secw, "셀 줄바꿈이 BREAK 로 설정됨")
+    check(run(FILL, "check", outw, "--strict").returncode == 0,
+          "긴 셀 결과가 strict 통과")
+
     # ── 마크다운 굵게가 별표로 새지 않는가 (실사용에서 10곳 발생) ──
     emd = tmp / "e.md"
     emd.write_text("# 제목\n## Ⅰ. 장\n"
