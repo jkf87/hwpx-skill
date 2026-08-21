@@ -14,14 +14,21 @@
 서식 글꼴: 맑은 고딕 11.5pt(본문)·장평 100·자간 0·줄간격 103%,
 기관명 18pt·발신명의 15pt·결문 9pt (gonmun2025 header.xml).
 
-두문·결문 구분선과 결재란 지오메트리는 실제 시행문(한국지능정보사회진흥원,
-2026. 8. 21. 발신)을 PDF 좌표로 실측해 맞췄다:
+이 생성기가 아는 것은 '공문의 형식'이지 특정 문서의 좌표가 아니다. 형식은
+세 층으로 나뉜다 — 어느 층에 속하느냐에 따라 바꿔도 되는 것과 안 되는 것이
+갈린다:
 
-  두문 구분선  제목 아래, 본문 폭 전체, 검정 0.4mm 실선
-  결문 구분선  발신명의 아래, 본문 폭 전체, 회색(#CCCCCC) 3.0mm 굵은 선
-  결재란       칸 간격 117pt = 직위칸 52pt + 서명칸 65pt, 서명칸 위에 결재일자 8pt
+  규정이 정한 것   두문·본문·결문 순서, 결문 항목 8가지와 그 순서, 항목 기호
+                   체계, 날짜·시간·금액 표기. 바꾸면 공문이 아니다.
+  기관이 정한 것   원훈, 구분선 색·굵기, 결재란 칸 구성. 기관마다 다르고
+                   기관 안에서는 같다. 실제 시행문(NIA, 2026. 8. 21.)에서 한
+                   벌을 실측해 기본값으로 뒀다 — 다른 기관이면 바꾼다.
+  내용이 정하는 것 결재란 칸 너비, 줄 수, 빈 줄 위치. 글자 수에서 계산한다.
+                   어떤 값도 박아 두지 않는다.
 
-결문 구분선을 편람 표준의 검정 실선으로 바꾸려면 ``"결문선": "검정"``.
+기본값(기관 층): 두문 구분선 검정 0.4mm / 결문 구분선 회색 3.0mm /
+결재란 직위칸·서명칸 2열, 서명칸 위 결재일자 8pt.
+``"결문선": "검정"`` 으로 편람 표준 실선으로 바꿀 수 있다.
 
 사용법:
     # JSON 입력으로 기안문 생성
@@ -89,11 +96,20 @@ LINE_SPACING = 160
 # 최상위 항목(1. 2. 3. …) 사이에는 빈 줄이 들어간다
 TOP_ITEM = re.compile(r"^\s*\d+\.\s")
 
-# 결재란 지오메트리(HWPUNIT, 1pt=100) — 실제 시행문 PDF 좌표 실측
-COL_TITLE = 5200   # 직위칸 52pt
-COL_SIGN = 6500    # 서명칸 65pt  (합계 117pt = 실측 칸 간격)
-ROW_DATE = 800     # 결재일자 행 8pt
-ROW_SIGN = 1300    # 직위/서명 행 13pt
+# ── 결재란 지오메트리 (HWPUNIT, 1pt=100) ──
+#
+# 아래 값은 '최소 너비'다. 실제 칸 너비는 들어갈 직위·성명 글자 수에서
+# 계산한다. 실측 시행문의 직위가 「연구원」·「센터장」 3자였다고 해서 52pt를
+# 박아 두면, 「공공AI전환지원센터장」(11자, 99pt)이 들어오는 순간 깨진다.
+# 형식을 재사용한다는 건 이 계산을 물려받는다는 뜻이지 좌표를 베끼는 게 아니다.
+COL_TITLE_MIN = 5200   # 직위칸 최소 52pt — 실측값
+COL_SIGN_MIN = 6500    # 서명칸 최소 65pt — 실측값(서명 이미지가 들어갈 자리)
+CELL_PAD = 1800        # 칸 좌우 여백 18pt
+ROW_DATE = 800         # 결재일자 행 8pt
+ROW_SIGN = 1300        # 직위/서명 행 13pt
+
+FOOT_PT = 900          # 결문 글자 9pt
+DATE_PT = 800          # 결재일자 글자 8pt
 
 # 결문 9개 필드 + 두문 5개 + 본문
 FIELDS = ["원훈", "기관명", "수신", "경유", "제목", "발신명의", "결재",
@@ -158,6 +174,27 @@ def _cell(col, row, width, height, paragraphs):
             f'<hp:cellMargin left="0" right="0" top="0" bottom="0"/></hp:tc>')
 
 
+def _text_width(text, char_h):
+    """글자 폭 추정 — 한글은 글자 크기 그대로, 로마자·숫자는 그 절반."""
+    korean = sum(1 for c in text if ord(c) > 0x7F)
+    return round(korean * char_h + (len(text) - korean) * char_h * 0.5)
+
+
+def _col_widths(결재):
+    """칸마다 [직위칸, 서명칸] 너비를 내용에서 계산한다.
+
+    표는 열 단위로 너비가 하나라, 같은 열의 두 행(결재일자 / 직위·성명) 중
+    넓은 쪽을 쓴다.
+    """
+    widths = []
+    for item in 결재:
+        title = _text_width(item.get("직위", ""), FOOT_PT) + CELL_PAD
+        sign = max(_text_width(item.get("성명", ""), FOOT_PT),
+                   _text_width(item.get("일자", ""), DATE_PT)) + CELL_PAD
+        widths += [max(COL_TITLE_MIN, title), max(COL_SIGN_MIN, sign)]
+    return widths
+
+
 def _gyeoljae_table(결재):
     """결재란 — 칸마다 [직위][결재일자/성명] 두 열. 표로 짜야 열이 흔들리지 않는다.
 
@@ -166,9 +203,7 @@ def _gyeoljae_table(결재):
     """
     if not 결재:
         return ""
-    widths = []
-    for _ in 결재:
-        widths += [COL_TITLE, COL_SIGN]
+    widths = _col_widths(결재)
     rows = []
     for r, (height, pick) in enumerate(((ROW_DATE, "일자"), (ROW_SIGN, "성명"))):
         cells = []
@@ -176,9 +211,9 @@ def _gyeoljae_table(결재):
             title = item.get("직위", "") if pick == "성명" else ""
             value = item.get(pick, "") or ""
             cp = CP_SIGN if pick == "성명" else CP_DATE
-            cells.append(_cell(i * 2, r, COL_TITLE, height,
+            cells.append(_cell(i * 2, r, widths[i * 2], height,
                                [_p(PP_FOOT, [(CP_FOOT, title)])]))
-            cells.append(_cell(i * 2 + 1, r, COL_SIGN, height,
+            cells.append(_cell(i * 2 + 1, r, widths[i * 2 + 1], height,
                                [_p(PP_FOOT, [(cp, value)])]))
         rows.append(f'<hp:tr>{"".join(cells)}</hp:tr>')
     return (f'<hp:p id="{next_id()}" paraPrIDRef="{PP_FOOT}" styleIDRef="0" '

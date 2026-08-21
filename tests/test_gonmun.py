@@ -48,8 +48,21 @@ check("두문: 제목 라벨", "제목  " in section)
 check("결문: 발신명의(행정안전부장관)", "행정안전부장관" in section)
 check("결문: 결재란이 표(직위/성명 두 열)", "<hp:tbl" in section
       and 'colCnt="6"' in section and "주무관" in section and "홍길동" in section)
-check("결재란 칸 너비 실측값(직위 52pt + 서명 65pt)",
-      f'width="{gonmun.COL_TITLE}"' in section and f'width="{gonmun.COL_SIGN}"' in section)
+check("결재란 칸 너비 — 짧은 직위는 최소값(직위 52pt + 서명 65pt)",
+      f'width="{gonmun.COL_TITLE_MIN}"' in section and f'width="{gonmun.COL_SIGN_MIN}"' in section)
+
+# 형식 재사용의 핵심 — 긴 직위가 들어오면 칸이 따라 늘어나야 한다.
+_long = gonmun._col_widths([{"직위": "공공AI전환지원센터장", "성명": "박결재", "일자": ""}])
+check("긴 직위(11자)는 칸이 내용만큼 넓어진다", _long[0] > gonmun.COL_TITLE_MIN
+      and _long[0] >= gonmun._text_width("공공AI전환지원센터장", gonmun.FOOT_PT))
+_short = gonmun._col_widths([{"직위": "간사", "성명": "한준구", "일자": ""}])
+check("짧은 직위(2자)는 최소값 밑으로 줄지 않는다", _short == [gonmun.COL_TITLE_MIN, gonmun.COL_SIGN_MIN])
+_date = gonmun._col_widths([{"직위": "국장", "성명": "이", "일자": "2026. 12. 31."}])
+check("결재일자가 성명보다 길면 서명칸은 일자에 맞춘다",
+      _date[1] >= gonmun._text_width("2026. 12. 31.", gonmun.DATE_PT) + gonmun.CELL_PAD)
+_sec_long = gonmun.build_section({**gonmun.SAMPLE,
+    "결재": [{"직위": "공공AI전환지원센터장", "성명": "박결재", "일자": ""}]})
+check("긴 직위가 문서에 그대로 들어간다", "공공AI전환지원센터장" in _sec_long)
 check("결재란 표는 테두리 없음", f'borderFillIDRef="{gonmun.BF_NONE}"' in section)
 check("결재일자는 8pt charPr", f'charPrIDRef="{gonmun.CP_DATE}"' in section
       and "2026. 6. 22." in section)
