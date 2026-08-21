@@ -199,12 +199,14 @@ def parse_body(text: str) -> tuple[str, list]:
 EMPH = re.compile(r"(\*\*.+?\*\*|__.+?__|\+\+.+?\+\+|==.+?==|!!.+?!!)")
 
 
-def runs(text: str, base: str, table: bool = False) -> str:
-    """강조 표식을 런으로 쪼갠다. 표 안이면 표용 charPr 를 쓴다."""
-    if table:
-        style = {"**": CP_TBL_B, "++": CP_TBL_BLUE, "!!": CP_TBL_RED, "__": CP_TBL_B, "==": CP_TBL_B}
-    else:
-        style = {"**": CP_BODY_B, "__": CP_BODY_U, "++": CP_BODY_BLUE, "==": CP_BODY_HL, "!!": CP_BODY_BLUE}
+BODY_EMPH = {"**": CP_BODY_B, "__": CP_BODY_U, "++": CP_BODY_BLUE, "==": CP_BODY_HL, "!!": CP_BODY_BLUE}
+TBL_EMPH = {"**": CP_TBL_B, "++": CP_TBL_BLUE, "!!": CP_TBL_RED, "__": CP_TBL_B, "==": CP_TBL_B}
+
+
+def runs(text: str, base: str, table: bool = False, styles: dict | None = None) -> str:
+    """강조 표식을 런으로 쪼갠다. 표 안이면 표용 charPr 를 쓴다.
+    다른 서식(geomto 등)은 styles 로 자기 charPr 맵을 넘긴다."""
+    style = styles if styles is not None else (TBL_EMPH if table else BODY_EMPH)
     out = []
     for piece in EMPH.split(text):
         if not piece:
@@ -368,7 +370,8 @@ def pic(item_id: str, w: int, h: int, halign: str = "LEFT") -> str:
 # ═══════════════════════════════════════════════════════════════════════
 # 본문 조립
 # ═══════════════════════════════════════════════════════════════════════
-def sec_pr() -> str:
+def sec_pr(left: int = M_LEFT, right: int = M_RIGHT, top: int = M_TOP, bottom: int = M_BOTTOM,
+           header: int = 0, footer: int = 0) -> str:
     return (f'<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" '
             f'tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" '
             f'textVerticalWidthHead="0" masterPageCnt="0">'
@@ -378,8 +381,8 @@ def sec_pr() -> str:
             f'border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" '
             f'showLineNumber="0"/><hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>'
             f'<hp:pagePr landscape="WIDELY" width="{PAGE_W}" height="{PAGE_H}" gutterType="LEFT_ONLY">'
-            f'<hp:margin header="0" footer="0" gutter="0" left="{M_LEFT}" right="{M_RIGHT}" '
-            f'top="{M_TOP}" bottom="{M_BOTTOM}"/></hp:pagePr>'
+            f'<hp:margin header="{header}" footer="{footer}" gutter="0" left="{left}" right="{right}" '
+            f'top="{top}" bottom="{bottom}"/></hp:pagePr>'
             f'<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/>'
             f'<hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/>'
             f'<hp:noteSpacing betweenNotes="283" belowLine="567" aboveLine="850"/>'
@@ -470,14 +473,17 @@ def build_section(meta: dict, title: str, blocks: list, images: list) -> str:
     return "\n".join(P)
 
 
-def patched_header(ls: int) -> str:
+def patched_header(ls: int, header: Path = None, base_ls: int = None, paras: tuple = None) -> str:
     """본문 줄간격을 바꾼 header.xml. 기본값이면 원본 그대로."""
-    x = HEADER.read_text(encoding="utf-8")
-    if ls == LINE_SPACING:
+    header = header or HEADER
+    base_ls = base_ls or LINE_SPACING
+    paras = paras or LS_PARAS
+    x = header.read_text(encoding="utf-8")
+    if ls == base_ls:
         return x
-    for pid in LS_PARAS:
+    for pid in paras:
         m = re.search(r'<hh:paraPr id="%s".*?</hh:paraPr>' % pid, x, re.S)
-        fixed = m.group(0).replace(f'<hh:lineSpacing type="PERCENT" value="{LINE_SPACING}"',
+        fixed = m.group(0).replace(f'<hh:lineSpacing type="PERCENT" value="{base_ls}"',
                                    f'<hh:lineSpacing type="PERCENT" value="{ls}"')
         assert fixed != m.group(0), f"paraPr {pid} 줄간격 자리를 못 찾았다"
         x = x[:m.start()] + fixed + x[m.end():]

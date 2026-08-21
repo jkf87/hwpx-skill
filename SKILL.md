@@ -32,6 +32,7 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── gonmun.py              # ★ 행정안전부 표준 기안문(별지 제1호서식) 생성기 (Workflow G)
 │   ├── gonmun_lint.py         # ★ 공문서 작성법 자동 검수기 (2025 편람)
 │   ├── yoyak.py               # ★ 요약보고(결재선 달린 1~3쪽 약식 보고) 생성기 — 마크다운 입력 (Workflow Y)
+│   ├── geomto.py              # ★ 기본계획·검토보고(로마숫자 장 배너, 표지 선택) 생성기 — 마크다운 입력 (Workflow Y)
 │   ├── bodojaryo.py           # ★ 정부 표준 보도자료 생성기 (레퍼런스 복제 방식)
 │   ├── gyehoek.py             # ★ 공공기관 계획서 생성기 (행안부 업무계획 복제, 제목/목차 토글)
 │   ├── gyehoek_hook.py        # ★ PreToolUse 훅 — 계획서 생성 전 제목/목차 포함 여부 강제 질문
@@ -43,6 +44,7 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── gonmun/                # 공문(간이형)
 │   ├── gonmun2025/            # ★ 행정안전부 표준 기안문 별지 제1호서식 (맑은 고딕 11.5pt)
 │   ├── yoyak/                 # ★ 요약보고 스타일(header.xml) — 실측값에서 파생, 원본 흔적 없음
+│   ├── geomto/                # ★ 기본계획·검토보고 스타일(header.xml = yoyak + 장 배너·표지)
 │   ├── minutes/               # 회의록
 │   ├── proposal/              # 제안서
 ├── assets/
@@ -58,6 +60,7 @@ ${CLAUDE_SKILL_DIR}/
     ├── official-doc-style.md  # 공문서 양식 상세
     ├── gonmunseo-2025-writing-rules.md  # ★ 2025 개정 공문서 작성법
     ├── yoyak-bogo-style.md      # ★ 요약보고 서식 실측·파생 (Workflow Y)
+    ├── geomto-bogo-style.md     # ★ 기본계획·검토보고 서식 실측·파생 (Workflow Y)
     ├── kordoc-integration.md  # kordoc 장점 채택/보류 기준
     └── xml-internals.md       # 저수준 XML 구조
 ```
@@ -121,7 +124,8 @@ Rules:
  ├─ "이 HWPX 양식으로 만들어줘" → 워크플로우 D (레퍼런스 기반)
  ├─ "이 양식 복제해서 내용 바꿔줘" → 워크플로우 F (양식 복제) ★
  ├─ "공문 작성해줘/공문서 검수해줘" → 워크플로우 G (공문서 작성법 준수) ★
- ├─ "요약보고/약식보고/단장님·부시장님 보고용 한 장" (결재선 + □❍- 개조식) → 워크플로우 Y ★
+ ├─ "요약보고/약식보고/단장님·부시장님 보고용 한 장" (결재선 + □❍- 개조식) → 워크플로우 Y (yoyak) ★
+ ├─ "기본계획/검토보고/검토서 만들어줘" (Ⅰ Ⅱ Ⅲ 장 배너, 표지·결재란 선택) → 워크플로우 Y (geomto) ★
  ├─ "문제지 한장 답안지 한장", "문제지+답안지", "정답지 포함 활동지" → 워크플로우 I ★
  ├─ "HTML 디자인을 HWPX로", "K-Teacher 스타일", "컬러 활동지" → 워크플로우 K ★
  └─ "HWPX 읽어줘" → 워크플로우 E (읽기/추출)
@@ -1088,6 +1092,39 @@ python3 scripts/yoyak.py --emit-sample > 보고.md        # 문법 예시 뽑기
 - 마무리 게이트는 다른 워크플로우와 같다: `validate.py` → `fill_hwpx.py check --strict` → `verify_hwpx.py`.
 
 자세한 실측값과 파생 과정: [references/yoyak-bogo-style.md](references/yoyak-bogo-style.md)
+
+### 같은 부서의 다쪽 서식 — 기본계획·검토보고 (`scripts/geomto.py`)
+
+> 제목 아래 본문이 **`▐Ⅰ▌ 추진배경 → ▐Ⅱ▌ 현황 → ▐Ⅲ▌ 세부계획 → ▐Ⅳ▌ 기대효과 → ▐Ⅴ▌ 행정사항`**
+> 로마숫자 장 배너로 나뉘는 계획서·검토보고. 결재선 표 대신 **표지**(문서정보·결재란·제목
+> 띠·기관명)를 붙일 수 있다. "기본계획", "검토보고", "검토서", "장 나눠서 계획서" 에 쓴다.
+
+```bash
+python3 scripts/geomto.py 계획.md -o 계획.hwpx
+python3 scripts/geomto.py --emit-sample > 계획.md
+```
+
+요약보고 문법에 더해:
+
+```markdown
+---
+부제: - ○○을 위한 -            ← 제목 위 한 줄 (선택)
+작성: 2026. 8. 21. ○○추진단 홍길동   ← 오른쪽 위 (선택)
+표지: true                      ← 표지 한 장 (선택)
+기관: ○○시 / 부서: ○○추진단 / 문서번호: / 보존기간: / 결재일자: / 공개여부:
+결재: 주무관 / 팀장 / 추진단장 / 부시장 / 시장   ← 표지 결재란 직위, 칸 수 = 인원수
+---
+# 제목
+> 리드 요약 (제목 바로 아래 → 테두리 박스)
+## 추진배경            → ▐Ⅰ▌ 추진배경  (번호 자동)
+- 항목 / 세부 / 3단    → ❍ / - / ▸
+> 본문 중간 박스
+* 각주                 → * (14pt)
+---                    → 쪽 나눔
+```
+
+헤더는 요약보고 것의 상위 집합이라(`templates/geomto/header.xml` = yoyak + 장 배너·표지
+스타일) 본문 규칙·표·강조가 요약보고와 같다. 실측값: [references/geomto-bogo-style.md](references/geomto-bogo-style.md)
 
 ## 워크플로우 G: 공문서 작성법 준수 (2025 개정) ★
 
