@@ -181,6 +181,23 @@ def main():
     r = run(mp, "residue", out, "--against", REF)
     check(r.returncode == 0, "산출물에 레퍼런스 원문 잔재 없음")
 
+    # ── 같은 입력이면 항상 같은 바이트가 나오는가 (결정론) ──
+    import hashlib, time
+    d1 = tmp / "d1.hwpx"
+    d2 = tmp / "d2.hwpx"
+    run(DS, "render", spec_dir, md, "-o", d1)
+    time.sleep(1.2)                    # 압축 시각이 섞이는지 보려면 초를 넘겨야 한다
+    run(DS, "render", spec_dir, md, "-o", d2)
+    h1 = hashlib.md5(d1.read_bytes()).hexdigest()
+    h2 = hashlib.md5(d2.read_bytes()).hexdigest()
+    check(h1 == h2, "같은 입력 → 같은 산출물 바이트(결정론)")
+
+    # 압축 시각이 고정돼 있어야 한다 — 안 그러면 실행할 때마다 파일이 달라진다
+    with zipfile.ZipFile(d1) as z:
+        stamps = {i.date_time for i in z.infolist()}
+    check(all(st[0] == 1980 for st in stamps),
+          f"모든 엔트리의 압축 시각이 고정됨 {sorted(stamps)[:2]}")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

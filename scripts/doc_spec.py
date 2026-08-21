@@ -707,7 +707,13 @@ def build_package(base: Path, out: Path, section: str,
             else:
                 zout.writestr(item, data)
         for iid, src in images:
-            zout.writestr(f"BinData/{iid}{src.suffix.lower()}", src.read_bytes())
+            # 압축 시각을 고정한다. writestr 에 문자열 이름을 주면 '현재 시각'이
+            # 박혀, 같은 입력인데도 파일 바이트가 매번 달라진다(실측). 나머지
+            # 엔트리와 같은 1980-01-01 로 맞춰 재현 가능하게 만든다.
+            info = zipfile.ZipInfo(f"BinData/{iid}{src.suffix.lower()}",
+                                   date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zout.writestr(info, src.read_bytes())
 
 
 def cmd_render(a) -> int:
