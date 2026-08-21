@@ -33,6 +33,7 @@ ${CLAUDE_SKILL_DIR}/
 │   ├── gonmun_lint.py         # ★ 공문서 작성법 자동 검수기 (2025 편람)
 │   ├── yoyak.py               # ★ 요약보고(결재선 달린 1~3쪽 약식 보고) 생성기 — 마크다운 입력 (Workflow Y)
 │   ├── geomto.py              # ★ 기본계획·검토보고(로마숫자 장 배너, 표지 선택) 생성기 — 마크다운 입력 (Workflow Y)
+│   ├── munche_lint.py         # ★ 개조식 보고서 원고 문체 검문기 (서술형 종결·수사적 대조·길이·표기) (Workflow Y)
 │   ├── bodojaryo.py           # ★ 정부 표준 보도자료 생성기 (레퍼런스 복제 방식)
 │   ├── gyehoek.py             # ★ 공공기관 계획서 생성기 (행안부 업무계획 복제, 제목/목차 토글)
 │   ├── gyehoek_hook.py        # ★ PreToolUse 훅 — 계획서 생성 전 제목/목차 포함 여부 강제 질문
@@ -61,6 +62,7 @@ ${CLAUDE_SKILL_DIR}/
     ├── gonmunseo-2025-writing-rules.md  # ★ 2025 개정 공문서 작성법
     ├── yoyak-bogo-style.md      # ★ 요약보고 서식 실측·파생 (Workflow Y)
     ├── geomto-bogo-style.md     # ★ 기본계획·검토보고 서식 실측·파생 (Workflow Y)
+    ├── bogo-munche.md           # ★ 개조식 보고서 문체 — 실측 15건 통계·규칙·검문표 (Workflow Y)
     ├── kordoc-integration.md  # kordoc 장점 채택/보류 기준
     └── xml-internals.md       # 저수준 XML 구조
 ```
@@ -1125,6 +1127,21 @@ python3 scripts/geomto.py --emit-sample > 계획.md
 
 헤더는 요약보고 것의 상위 집합이라(`templates/geomto/header.xml` = yoyak + 장 배너·표지
 스타일) 본문 규칙·표·강조가 요약보고와 같다. 실측값: [references/geomto-bogo-style.md](references/geomto-bogo-style.md)
+
+### 원고 문체 — 조판 전에 검문한다 (`scripts/munche_lint.py`)
+
+> 서식이 맞아도 **문체가 다르면 그 부서 문서로 안 보인다.** 실측 15건은 개조식이다 —
+> `~다`로 끝나는 줄 0%, `A가 아니라 B다` 식 수사 0건, 물음표·느낌표 0, ❍ 항목 중앙 31자,
+> ⇒ 결론 30자 명사 종결, 리드문은 `~하고자 함.` 한 문장, 항목 머리에 `(괄호 소제목)`.
+> 내용 에이전트는 [references/bogo-munche.md](references/bogo-munche.md) 를 읽고 쓰고,
+> 행정병에게 넘기기 전에 검문기를 돌린다.
+
+```bash
+python3 scripts/munche_lint.py 원고.md        # 위반(error) 있으면 exit 2 — 고친 뒤 조판
+```
+
+LLM 이 잘 빠지는 버릇을 잡는다: `~해야 현장에 남는다`(서술형), `도구가 아니라 사람이다`(수사적
+대조), `가르치는 일은 사람이, 반복되는 일은 AI가`(대구 슬로건), `— 설명`(줄표 덧붙임).
 
 ## 워크플로우 G: 공문서 작성법 준수 (2025 개정) ★
 
