@@ -711,8 +711,13 @@ python3 scripts/convert_hwp.py <ref.hwp> -o <ref.hwpx>
 python3 scripts/doc_spec.py analyze <ref.hwpx> -o spec/
 
 # [2] 원고를 그 규범으로 조판
-python3 scripts/doc_spec.py render spec/ <content.md> -o out.hwpx
+python3 scripts/doc_spec.py render spec/ <content.md> -o out.hwpx \
+    [--cover-page] [--toc] [--org 기관명] [--date "2026. 8. 21."]
 ```
+
+`--cover-page` 는 제목을 **독립 표지 쪽**으로 세우고 그 아래 날짜·기관을 넣는다.
+`--toc` 는 장(`##`) 제목을 모아 **목차 쪽**을 만든다. 보고서·계획서처럼 분량이
+있는 문서에 쓴다.
 
 `analyze` 가 뽑는 것 — 본문 계층별 대표 서식(□/ㅇ/-/*/※/￭/⇒), 제목 배너
 (표지·장·절), 강조 박스, 제목 있는 박스, 데이터 표, 이미지 배치.
@@ -724,6 +729,8 @@ python3 scripts/doc_spec.py render spec/ <content.md> -o out.hwpx
 ## Ⅰ. 장 제목                → 장 배너
 ### 1 절 제목                → 절 배너([번호][제목])
 □ 대항목 / ㅇ 중항목 / - 소항목 / * 각주 / ※ 참고 / ￭ 실적
+- 목록 항목                  → 들여쓰기 깊이로 계층 지정(0칸=중항목, 2칸=소항목)
+  - 두 칸 들여쓴 하위 항목       기호를 직접 쓰지 않아도 레퍼런스의 기호가 붙는다
 ⇒ 결론 문장                  → 강조 박스로 조판
 ::: <박스 제목>              → 제목 있는 박스
 ￭ 박스 안 항목

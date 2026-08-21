@@ -400,6 +400,13 @@ def fill_cell_paragraphs(frag: str, cell_idx: int, lines: list,
     return frag[:st] + new_cell + frag[en:]
 
 
+def page_break() -> str:
+    """빈 문단에 쪽 나눔을 걸어 다음 쪽으로 넘긴다."""
+    return ('<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="1" '
+            'columnBreak="0" merged="0"><hp:run charPrIDRef="0">'
+            "<hp:t></hp:t></hp:run></hp:p>")
+
+
 def renumber(xml: str, start: int = 1000) -> str:
     """문단 id 를 문서 안에서 고유하게 다시 매긴다."""
     n = [start]
@@ -503,6 +510,11 @@ def widen_banner(frag: str, title_cell: int, title: str, body_width: int,
 # ─────────────────────────── 내용 파싱 ───────────────────────────
 
 TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
+LIST_ITEM = re.compile(r"^(\s*)[-*]\s+(.*)$")
+
+# 들여쓰기 깊이 → 층위. 원고에 ㅇ/- 를 직접 쓰지 않고 목록 들여쓰기만으로
+# 계층을 표현할 수 있게 한다(공문서 편집기들이 쓰는 관행).
+INDENT_LEVELS = ["bullet", "dash", "dash"]
 
 
 def parse_content(text: str) -> list:
@@ -550,14 +562,23 @@ def parse_content(text: str) -> list:
             blocks.append({"type": "image", "path": m.group(1) if m else ""})
             i += 1
         else:
-            blocks.append({"type": "para", "text": ln.rstrip()})
+            m = LIST_ITEM.match(ln)
+            if m and not s.startswith("* "):        # '* 각주' 는 기존 각주 층위
+                depth = len(m.group(1)) // 2
+                lvl = INDENT_LEVELS[min(depth, len(INDENT_LEVELS) - 1)]
+                blocks.append({"type": "para", "text": m.group(2).rstrip(),
+                               "level": lvl, "depth": depth})
+            else:
+                blocks.append({"type": "para", "text": ln.rstrip()})
             i += 1
     return blocks
 
 
 # ─────────────────────────── render ───────────────────────────
 
-def render(specdir: Path, content: Path, out: Path) -> dict:
+def render(specdir: Path, content: Path, out: Path,
+           cover_page: bool = False, toc: bool = False,
+           org: str = "", date: str = "") -> dict:
     spec = json.loads((specdir / "spec.json").read_text(encoding="utf-8"))
     tpl = specdir / "templates"
     base = specdir / "base.hwpx"
@@ -594,7 +615,31 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
     # 데이터 표는 열 수가 가장 흔한 것을 기본으로 쓴다
     table_t = next((v["template"] for v in spec.get("tables", {}).values()), None)
 
-    for b in parse_content(content.read_text(encoding="utf-8")):
+    blocks = parse_content(content.read_text(encoding="utf-8"))
+
+    # 표지 페이지 — 제목을 독립 쪽으로 세우고 아래에 날짜·기관을 둔다
+    if cover_page:
+        cov = next((b for b in blocks if b["type"] == "cover"), None)
+        if cov and cover_t:
+            parts.append(fill_cells(T(cover_t), [None, cov["title"], None],
+                                    bold_map))
+            for line in (date, org):
+                if line:
+                    parts.append(para("plain", line))
+            parts.append(page_break())
+            blocks = [b for b in blocks if b is not cov]
+
+    # 목차 — 장(##) 제목을 모아 한 쪽으로
+    if toc:
+        chapters = [b["title"] for b in blocks if b["type"] == "chapter"]
+        if chapters:
+            parts.append(para("plain", "목  차"))
+            parts.append(para("plain", ""))
+            for c in chapters:
+                parts.append(para("bullet", c))
+            parts.append(page_break())
+
+    for b in blocks:
         t = b["type"]
         if t == "cover" and cover_t:
             parts.append(fill_cells(T(cover_t), [None, b["title"], None], bold_map))
@@ -631,6 +676,13 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
                 continue
         elif t == "para":
             txt = b["text"]
+            if b.get("level"):                     # 들여쓰기로 층위가 정해진 항목
+                lv = spec["levels"].get(b["level"])
+                mk = (lv or {}).get("marker") or ""
+                pad = "   " * b.get("depth", 0)
+                parts.append(para(b["level"], f"{pad}{mk} {txt}".rstrip()))
+                used[t] += 1
+                continue
             kind = classify(txt.strip())
             if kind == "arrow" and callout_t:
                 parts.append(fill_cells(T(callout_t), [txt.strip()], bold_map))
@@ -793,7 +845,10 @@ def build_package(base: Path, out: Path, section: str,
 
 
 def cmd_render(a) -> int:
-    r = render(Path(a.spec), Path(a.content), Path(a.out))
+    r = render(Path(a.spec), Path(a.content), Path(a.out),
+               cover_page=getattr(a, "cover_page", False),
+               toc=getattr(a, "toc", False),
+               org=getattr(a, "org", ""), date=getattr(a, "date", ""))
     print(f"조판 완료 → {r['out']}")
     print(f"  블록: {r['blocks']}")
     q = lint_document(Path(a.out))          # 조판 직후 자동 검문
@@ -906,6 +961,11 @@ def main() -> int:
     r.add_argument("spec")
     r.add_argument("content")
     r.add_argument("-o", "--out", required=True)
+    r.add_argument("--cover-page", action="store_true", dest="cover_page",
+                   help="제목을 독립 표지 쪽으로 세운다")
+    r.add_argument("--toc", action="store_true", help="장 제목으로 목차 쪽 생성")
+    r.add_argument("--org", default="", help="표지에 넣을 기관·작성주체")
+    r.add_argument("--date", default="", help="표지에 넣을 날짜")
     r.set_defaults(fn=cmd_render)
     q = sub.add_parser("lint", help="조판 결과의 레이아웃 품질 검문")
     q.add_argument("file")

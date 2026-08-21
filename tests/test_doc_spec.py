@@ -255,6 +255,32 @@ def main():
     check("칸이 낮다" not in r.stdout,
           "제목행 칸이 내용보다 낮게 잡히지 않음")
 
+    # ── 표지·목차·들여쓰기 계층 (문서 구조 규약) ──
+    st = tmp / "st.md"
+    st.write_text("# 조사 보고\n"
+                  "## Ⅰ. 개요\n### 1 배경\n"
+                  "- 최상위 항목\n  - 한 단계 아래\n"
+                  "## Ⅱ. 결과\n### 1 요약\n- 항목\n", encoding="utf-8")
+    outs = tmp / "st.hwpx"
+    r = run(DS, "render", spec_dir, st, "-o", outs,
+            "--cover-page", "--toc", "--org", "조사팀", "--date", "2026. 8. 21.")
+    check(r.returncode == 0, "표지·목차 조판 성공")
+    sects = section_of(outs)
+    txt = " ".join(re.findall(r"<hp:t>(.*?)</hp:t>", sects, re.S))
+    check("목  차" in txt, "목차 쪽이 생성됨")
+    check("Ⅰ. 개요" in txt and "Ⅱ. 결과" in txt, "목차에 장 제목이 모임")
+    check("조사팀" in txt and "2026. 8. 21." in txt, "표지에 기관·날짜가 들어감")
+    check(len(re.findall(r'pageBreak="1"', sects)) >= 2,
+          "표지·목차 뒤에 쪽 나눔이 들어감")
+    # 들여쓰기 깊이가 계층 기호로 바뀌는가
+    lv = json.loads((spec_dir / "spec.json").read_text(encoding="utf-8"))["levels"]
+    bmk = lv.get("bullet", {}).get("marker", "")
+    check(bool(bmk) and f"{bmk} 최상위 항목" in txt,
+          "목록 0단계가 중항목 기호로 조판됨")
+    check("- 한 단계 아래" in txt, "목록 1단계가 소항목 기호로 조판됨")
+    check(run(FILL, "check", outs, "--strict").returncode == 0,
+          "표지·목차 결과가 strict 통과")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
