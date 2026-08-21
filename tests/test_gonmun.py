@@ -55,7 +55,7 @@ check("결재란 칸 너비 — 짧은 직위는 최소값(직위 52pt + 서명 
 _long = gonmun._col_widths([{"직위": "공공AI전환지원센터장", "성명": "박결재", "일자": ""}])
 check("긴 직위(11자)는 칸이 내용만큼 넓어진다", _long[0] > gonmun.COL_TITLE_MIN
       and _long[0] >= gonmun._text_width("공공AI전환지원센터장", gonmun.FOOT_PT))
-_short = gonmun._col_widths([{"직위": "간사", "성명": "한준구", "일자": ""}])
+_short = gonmun._col_widths([{"직위": "간사", "성명": "홍길동", "일자": ""}])
 check("짧은 직위(2자)는 최소값 밑으로 줄지 않는다", _short == [gonmun.COL_TITLE_MIN, gonmun.COL_SIGN_MIN])
 _date = gonmun._col_widths([{"직위": "국장", "성명": "이", "일자": "2026. 12. 31."}])
 check("결재일자가 성명보다 길면 서명칸은 일자에 맞춘다",
@@ -171,7 +171,7 @@ check("위반 탐지: DATE_KOREAN",
       any(f["rule"] == "DATE_KOREAN"
           for f in gonmun_lint.lint_text("일시: 2026년 8월 25일(화)")["findings"]))
 # 결문 홈페이지 주소의 '://' 는 쌍점 규칙 대상이 아니다
-_url = gonmun_lint.lint_text("우 41068  대구광역시 동구 첨단로, 53  /  http://www.nia.or.kr/")
+_url = gonmun_lint.lint_text("우 30112  세종특별자치시 한누리대로 411  /  http://www.example.go.kr/")
 check("URL '://' 오탐 없음",
       not any(f["rule"] == "COLON_SPACE" for f in _url["findings"]))
 check("정상문 오탐 없음(error 0)", res2["summary"].get("error", 0) == 0,

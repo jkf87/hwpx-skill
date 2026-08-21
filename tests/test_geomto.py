@@ -30,6 +30,8 @@ def check(name, cond, detail=""):
 
 
 HDR = geomto.HEADER.read_text(encoding="utf-8")
+ALLOWED_FONTS = {"함초롬돋움", "함초롬바탕", "맑은 고딕", "휴먼명조", "HY헤드라인M", "HY울릉도M", "한양신명조"}
+_fonts = dict(re.findall(r'<hh:font id="(\d+)" face="([^"]+)"', HDR))
 charpr = lambda i: re.search(r'<hh:charPr id="%s".*?</hh:charPr>' % i, HDR, re.S).group(0)
 parapr = lambda i: re.search(r'<hh:paraPr id="%s".*?</hh:paraPr>' % i, HDR, re.S).group(0)
 borderfill = lambda i: re.search(r'<hh:borderFill id="%s".*?</hh:borderFill>' % i, HDR, re.S).group(0)
@@ -54,7 +56,7 @@ check("❍ 항목 내어쓰기 3644 · 앞 띄움 300", 'intent value="-3644"' i
 check("- 세부 내어쓰기 4174(실측)", 'intent value="-4174"' in parapr(geomto.PP_SUB))
 check(f"본문 줄간격 기본 {geomto.LINE_SPACING}%", f'value="{geomto.LINE_SPACING}"' in parapr(geomto.PP_ITEM))
 check("작성자 줄 오른쪽 정렬", 'horizontal="RIGHT"' in parapr(geomto.PP_AUTHOR))
-check("전용 글꼴·그림 브러시 흔적 없음", not re.search(r"광양|감동체|햇살체|KoPub|imgBrush|gradation", HDR))
+check("글꼴은 한컴 번들 7벌뿐 · 그림/그라데이션 브러시 없음", set(_fonts.values()) <= ALLOWED_FONTS and "imgBrush" not in HDR and "gradation" not in HDR)
 
 print("[파서]")
 title, blocks = geomto.parse_body(
@@ -116,7 +118,11 @@ with tempfile.TemporaryDirectory() as d:
     check("미정의 스타일 ID 없음", not (used("charPr") - dfn("charPr")) and not (used("paraPr") - dfn("paraPr"))
           and not (used("borderFill") - dfn("borderFill")))
     check("linesegarray 없음", "linesegarray" not in s)
-    check("원본 문서 흔적 없음", not re.search(r"광양|김종호|강창성|감동시대|매돌이|종량제", s + h))
+    _txt = " ".join(re.findall(r"<hp:t>(.*?)</hp:t>", s))
+    _alien = [w for w in re.findall(r"[가-힣]{2,}", _txt) if w not in re.sub(r"[*+!_=]{2}", "", geomto.SAMPLE)
+              and w not in ("문서번호", "보존기간", "결재일자", "공개여부")]
+    check("본문 한글 낱말이 전부 샘플에서 온 것(템플릿 삽입 글자는 표지 라벨 4개뿐)", not _alien, str(_alien[:5]))
+    check("한컴 붙여넣기 그림 이름(CLP…) 없음", "CLP0" not in s)
     check("날짜 메타 = 작성일", "2026-08-21T00:00:00Z" in z.read("Contents/content.hpf").decode())
     (d / "ls.md").write_text("---\n줄간격: 150\n---\n# 제목\n## 장\n- 항목\n", encoding="utf-8")
     geomto.generate(d / "ls.md", d / "ls.hwpx")

@@ -44,11 +44,12 @@ def borderfill(i):
 
 
 fonts = dict(re.findall(r'<hh:font id="(\d+)" face="([^"]+)"', HDR))
+ALLOWED_FONTS = {"함초롬돋움", "함초롬바탕", "맑은 고딕", "휴먼명조", "HY헤드라인M", "HY울릉도M", "한양신명조"}
 
 print("[기관 층 — header.xml]")
 check("글꼴 7벌 (한글 목록)", fonts.get("3") == "휴먼명조" and fonts.get("4") == "HY헤드라인M"
       and fonts.get("5") == "HY울릉도M" and fonts.get("6") == "한양신명조")
-check("전용 글꼴 흔적 없음", not re.search(r"광양|감동체|햇살체|KoPub", HDR))
+check("글꼴은 한컴 번들 7벌뿐(전용·외부 서체 없음)", set(fonts.values()) <= ALLOWED_FONTS, str(set(fonts.values()) - ALLOWED_FONTS))
 check("제목 20pt HY헤드라인M", 'height="2000"' in charpr(yoyak.CP_TITLE) and 'hangul="4"' in charpr(yoyak.CP_TITLE))
 check("소제목 16pt HY헤드라인M", 'height="1600"' in charpr(yoyak.CP_H1))
 check("본문 15pt 휴먼명조 장평 98", 'height="1500"' in charpr(yoyak.CP_BODY) and 'hangul="3"' in charpr(yoyak.CP_BODY)
@@ -117,7 +118,12 @@ with tempfile.TemporaryDirectory() as d:
     check("linesegarray 없음", "linesegarray" not in sec)
     check("제목이 content.hpf 에", "<opf:title>「○○시 공공 AX 실습교육」 운영 현황 보고</opf:title>" in hpf)
     check("날짜 메타 = 보고일(현재 시각 아님)", "2026-08-21T00:00:00Z" in hpf)
-    check("원본 문서 흔적 없음", not re.search(r"광양|김종호|강창성|감동시대", sec + hpf))
+    # 본문 글자는 전부 샘플 마크다운에서 왔는가 — 템플릿이 글자를 끼워 넣지 않는다
+    _txt = " ".join(re.findall(r"<hp:t>(.*?)</hp:t>", sec))
+    _src = re.sub(r"[*+!_=]{2}", "", yoyak.SAMPLE)
+    _alien = [w for w in re.findall(r"[가-힣]{2,}", _txt) if w not in _src and w not in ("보고서", "기관명")]
+    check("본문 한글 낱말이 전부 샘플에서 온 것(템플릿 삽입 글자 없음)", not _alien, str(_alien[:5]))
+    check("한컴 붙여넣기 그림 이름(CLP…)·그림 브러시 없음", "CLP0" not in sec + hpf and "imgBrush" not in z.read("Contents/header.xml").decode())
     check("PrvText 채움", len(z.read("Preview/PrvText.txt")) > 100)
     # 그림 + 로고 + 줄간격
     from PIL import Image
