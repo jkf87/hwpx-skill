@@ -192,6 +192,10 @@ def analyze(ref: Path, outdir: Path) -> dict:
         (tpl / "image.xml").write_text(images[0], encoding="utf-8")
         spec["objects"]["image"] = {"template": "image.xml", "count": len(images)}
 
+    # 본문 폭 = 가장 넓은 표의 폭. 배너 폭을 다시 계산할 때 상한으로 쓴다.
+    widths = [int(m.group(1)) for m in
+              re.finditer(r'<hp:sz width="(\d+)" widthRelTo="ABSOLUTE"', inner)]
+    spec["body_width"] = max(widths) if widths else 0
     spec["stats"] = dict(counts)
     (outdir / "spec.json").write_text(
         json.dumps(spec, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -423,6 +427,43 @@ def make_image(proto: str, item_id: str, px_w: int, px_h: int,
     return out
 
 
+def text_width(text: str) -> int:
+    """제목 한 줄이 차지할 대략적인 폭(HWPUNIT).
+
+    레퍼런스 배너에서 역산한 값 — 한글 한 자 ≈ 2200, 영문/숫자 ≈ 1100,
+    좌우 여백 4000. 눈금이 아니라 '한 줄에 들어가게' 잡기 위한 근사치다.
+    """
+    korean = sum(1 for c in text if ord(c) > 0x7F)
+    return korean * 2200 + (len(text) - korean) * 1100 + 4000
+
+
+def widen_banner(frag: str, title_cell: int, title: str, body_width: int) -> str:
+    """배너의 제목 칸을 제목 길이에 맞게 넓힌다.
+
+    배너 템플릿의 칸 폭은 '원본 제목 길이'에 맞춰 굳어 있다(실측: 절 배너의
+    제목 칸이 38.5mm — 원본 제목 '기본 방향' 4자 기준). 그대로 두면 긴 제목이
+    서너 줄로 접혀 배너가 뭉개진다.
+    """
+    cells = spans(frag, "tc")
+    if title_cell >= len(cells) or not body_width:
+        return frag
+    widths = []
+    for st, en in cells:
+        m = re.search(r'<hp:cellSz width="(\d+)"', frag[st:en])
+        widths.append(int(m.group(1)) if m else 0)
+    others = sum(w for i, w in enumerate(widths) if i != title_cell)
+    want = max(widths[title_cell], text_width(title))
+    new_w = min(want, max(body_width - others, widths[title_cell]))
+    if new_w == widths[title_cell]:
+        return frag
+    st, en = cells[title_cell]
+    cell = re.sub(r'(<hp:cellSz width=")\d+(")', rf'\g<1>{new_w}\g<2>',
+                  frag[st:en], count=1)
+    out = frag[:st] + cell + frag[en:]
+    total = others + new_w
+    return re.sub(r'(<hp:sz width=")\d+(")', rf'\g<1>{total}\g<2>', out, count=1)
+
+
 # ─────────────────────────── 내용 파싱 ───────────────────────────
 
 TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
@@ -490,6 +531,7 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
         return strip_linesegs((tpl / name).read_text(encoding="utf-8"))
 
     bold_map = build_bold_map(base)
+    body_w = spec.get("body_width", 0)
 
     def para(kind: str, text: str) -> str:
         lv = spec["levels"].get(kind) or spec["levels"].get("plain")
@@ -520,9 +562,11 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
         if t == "cover" and cover_t:
             parts.append(fill_cells(T(cover_t), [None, b["title"], None], bold_map))
         elif t == "chapter" and chap_t:
-            parts.append(fill_cells(T(chap_t), [b["title"]], bold_map))
+            frag = fill_cells(T(chap_t), [b["title"]], bold_map)
+            parts.append(widen_banner(frag, 0, b["title"], body_w))
         elif t == "section" and sect_t:
-            parts.append(fill_cells(T(sect_t), [b["num"], None, b["title"]], bold_map))
+            frag = fill_cells(T(sect_t), [b["num"], None, b["title"]], bold_map)
+            parts.append(widen_banner(frag, 2, b["title"], body_w))
         elif t == "titled_box" and titled_t:
             frag = T(titled_t)
             cells = spans(frag, "tc")

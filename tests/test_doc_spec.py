@@ -102,6 +102,36 @@ def main():
     check(run(FILL, "check", out3, "--strict").returncode == 0,
           "초장문 결과가 strict 통과")
 
+    # ── 긴 제목이 배너에서 여러 줄로 접히지 않는가 ──
+    bmd = tmp / "bn.md"
+    bmd.write_text("# 표지\n## Ⅰ. 짧은 장\n### 1 기관 현황\n"
+                   "### 2 인공지능 및 데이터 경제 활성화 추진\n", encoding="utf-8")
+    outb = tmp / "bn.hwpx"
+    check(run(DS, "render", spec_dir, bmd, "-o", outb).returncode == 0,
+          "배너 조판됨")
+    secb = section_of(outb)
+    widths = {}
+    for mt in re.finditer(r"<hp:tbl\b.*?</hp:tbl>", secb, re.S):
+        frag = mt.group()
+        cells = re.findall(r"<hp:tc\b.*?</hp:tc>", frag, re.S)
+        if not cells:
+            continue
+        txt = re.sub(r"<[^>]*>", "", cells[-1]).strip()
+        w = re.search(r'<hp:cellSz width="(\d+)"', cells[-1])
+        if txt and w:
+            widths[txt] = int(w.group(1))
+    long_t = next((k for k in widths if "인공지능" in k), None)
+    short_t = next((k for k in widths if "기관 현황" in k), None)
+    check(long_t is not None and short_t is not None, "배너 제목 칸을 찾음")
+    if long_t and short_t:
+        check(widths[long_t] > widths[short_t],
+              f"긴 제목 칸이 더 넓게 잡힘 ({widths[long_t]} > {widths[short_t]})")
+        # 17자 한글이 한 줄에 들어가려면 대략 2200*17 이상은 되어야 한다
+        check(widths[long_t] >= 2200 * 12,
+              "긴 제목이 한 줄에 들어갈 만큼 넓음(여러 줄 접힘 방지)")
+    check(run(FILL, "check", outb, "--strict").returncode == 0,
+          "배너 결과가 strict 통과")
+
     # ── 긴 셀 텍스트가 겹쳐 찍히지 않는가 (lineWrap SQUEEZE 사고) ──
     wmd = tmp / "w.md"
     wmd.write_text(
