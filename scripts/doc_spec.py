@@ -114,6 +114,13 @@ def analyze(ref: Path, outdir: Path) -> dict:
 
     # 첫 문단(secPr 보유) = 페이지 설정. 통째로 보존한다.
     first = next(iter_blocks(inner))[2]
+    # 첫 문단이 secPr 과 '원본 제목 배너' 를 함께 담고 있는 문서가 있다
+    # (한컴은 제목 표를 첫 문단 안에 넣기도 한다). 그대로 두면 조판하는 모든
+    # 문서에 원본 제목이 딸려 들어간다. 페이지 설정만 남기고 개체는 뗀다.
+    if "<hp:secPr" in first and ("<hp:tbl" in first or "<hp:pic" in first):
+        m = re.search(r'(<hp:p\b[^>]*>.*?<hp:secPr\b.*?</hp:secPr>.*?</hp:run>).*?(</hp:p>)', first, re.S)
+        if m:
+            first = m.group(1) + m.group(2)
     (tpl / "first_para.xml").write_text(first, encoding="utf-8")
     spec["page"] = {"template": "first_para.xml",
                     "has_secPr": "<hp:secPr" in first}
@@ -691,26 +698,31 @@ def build_table(frag: str, rows: list, bold_map: dict | None = None,
         proto_h = int(m_h.group(1))
 
     body_ch = first_char_height(body_proto or "", heights or {}, 1000)
-    line_adv = round(body_ch * 1.7)          # 줄간격 포함 한 줄 이동량
+    head_ch = first_char_height(head_proto or "", heights or {}, body_ch)
 
-    def cell_height(n_lines: int) -> int:
-        return proto_h + max(0, n_lines - 1) * line_adv
+    def cell_height(n_lines: int, ch: int) -> int:
+        # 여백 포함 한 줄 높이 + 추가 줄마다 줄간격
+        return proto_h + max(0, n_lines - 1) * round(ch * 1.7)
 
-    def lines_needed(text: str) -> int:
-        """칸 폭에 견줘 몇 줄이 될지 어림한다."""
+    def lines_needed(text: str, ch: int) -> int:
+        """칸 폭에 견줘 몇 줄이 될지 어림한다.
+
+        글자 크기를 칸마다 받는다 — 일차 제목행처럼 본문보다 큰 글꼴을 쓰는
+        행을 본문 글꼴로 재면 줄 수가 모자라 칸이 낮게 잡힌다(검문에 걸림).
+        """
         if not text or not cell_w:
             return 1
         usable = max(cell_w - CELL_PAD, 1000)
-        return max(1, -(-(text_width(text, body_ch) - CELL_PAD) // usable))
+        return max(1, -(-(text_width(text, ch) - CELL_PAD) // usable))
 
-    def make_cell(proto, text, col, row, row_lines):
+    def make_cell(proto, text, col, row, row_lines, ch):
         c = set_text(proto, text, bold_map)
         if proto_h:
             # 원본 한 줄 높이(여백 포함)에 '추가 줄'만큼 줄간격을 더한다.
             # 한 줄 높이를 줄 수만큼 곱하면 여백이 줄마다 중복돼 칸이 과하게
             # 커진다(실측: 4줄짜리가 45mm → 실제 필요한 건 27mm 남짓).
             c = re.sub(r'(<hp:cellSz width="\d+" height=")\d+(")',
-                       rf'\g<1>{cell_height(row_lines)}\g<2>', c, count=1)
+                       rf'\g<1>{cell_height(row_lines, ch)}\g<2>', c, count=1)
         c = re.sub(r'<hp:cellAddr colAddr="\d+" rowAddr="\d+"/>',
                    f'<hp:cellAddr colAddr="{col}" rowAddr="{row}"/>', c)
         c = re.sub(r'<hp:cellSpan colSpan="\d+" rowSpan="\d+"/>',
@@ -723,12 +735,13 @@ def build_table(frag: str, rows: list, bold_map: dict | None = None,
     for r_i, row in enumerate(rows):
         proto = head_proto if r_i == 0 else body_proto
         # 한 행의 높이는 그 행에서 가장 많은 줄을 쓰는 칸에 맞춘다
-        row_lines = max((lines_needed(row[c] if c < len(row) else "")
+        ch = head_ch if r_i == 0 else body_ch
+        row_lines = max((lines_needed(row[c] if c < len(row) else "", ch)
                          for c in range(ncol)), default=1)
-        total_h += cell_height(row_lines)
+        total_h += cell_height(row_lines, ch)
         cells = "".join(
             make_cell(proto, row[c_i] if c_i < len(row) else "", c_i, r_i,
-                      row_lines)
+                      row_lines, ch)
             for c_i in range(ncol))
         built.append(f"<hp:tr>{cells}</hp:tr>")
 

@@ -235,6 +235,26 @@ def main():
     check(ds.classify("▶ 항목") == "tri" and ds.classify("＊ 각주") == "note",
           "다른 기관 표기(▶, ＊)도 인식")
 
+    # ── 첫 문단이 원본 제목 배너를 물고 오지 않는가 ──
+    # 한컴은 제목 표를 secPr 과 같은 문단에 넣기도 한다. 그대로 두면 조판하는
+    # 모든 문서에 원본 제목이 딸려 들어간다.
+    fp = (spec_dir / "templates" / "first_para.xml").read_text(encoding="utf-8")
+    check("<hp:secPr" in fp, "first_para 가 페이지 설정을 보존")
+    check("<hp:tbl" not in fp and "<hp:pic" not in fp,
+          "first_para 에 원본 표·그림이 딸려오지 않음")
+
+    # ── 큰 글꼴 행의 높이가 그 행 글꼴 기준으로 잡히는가 ──
+    bg = tmp / "bg.md"
+    bg.write_text("# 표\n## Ⅰ. 장\n| 아주 긴 일차 제목행이 들어가는 자리입니다 | |\n"
+                  "| --- | --- |\n| 시간 | 프로그램(안) |\n"
+                  "| 10:00~10:30 | 오프닝 |\n", encoding="utf-8")
+    outg = tmp / "bg.hwpx"
+    check(run(DS, "render", spec_dir, bg, "-o", outg).returncode == 0,
+          "큰 글꼴 제목행 표 조판됨")
+    r = run(DS, "lint", outg)
+    check("칸이 낮다" not in r.stdout,
+          "제목행 칸이 내용보다 낮게 잡히지 않음")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

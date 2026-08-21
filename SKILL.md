@@ -704,6 +704,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/fill_hwpx.py" fill form.hwpx out.hwpx --cel
 ### 사용법
 
 ```bash
+# [0] 레퍼런스가 .hwp(바이너리)면 먼저 변환한다 — analyze 는 .hwpx 만 읽는다
+python3 scripts/convert_hwp.py <ref.hwp> -o <ref.hwpx>
+
 # [1] 레퍼런스에서 편집 규범 추출 (스타일 공급용 base.hwpx 도 함께 보관)
 python3 scripts/doc_spec.py analyze <ref.hwpx> -o spec/
 
