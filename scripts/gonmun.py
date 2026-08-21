@@ -40,6 +40,8 @@ JSON 스키마(예시는 --sample 참고):
       "원훈": "우리는 ...",                    // 선택 — 상단 표어
       "결재": [{"직위": "...", "성명": "...", "일자": "2026. 8. 21."}],
       "결문선": "회색",                        // 회색(기본) | 검정
+      "줄간격": 160,                           // 본문 줄간격(%) — 기본 160
+      "항목간_빈줄": true,                     // 1./2./3. 사이 빈 줄(기본 true)
       "body": ["1. ...", "  가. ...", ...],   // 본문 항목(들여쓰기 포함)
       "붙임": ["계획서 1부.", ...],            // 선택
       "끝": true
@@ -79,6 +81,13 @@ PP_RULE_GRAY = "27"   # 결문 구분선(회색 3.0mm)
 PP_RULE_BLACK = "28"  # 결문 구분선(검정 0.4mm) — 편람 표준 변형
 
 BF_NONE = "1"     # 테두리 없는 borderFill — 결재란 표
+
+# 본문 줄간격(%). 편람 기본은 103%지만 실제 시행문은 12pt 글자에 19pt 줄 —
+# 약 160%다. 103%로 짜면 본문이 눌려 붙어 공문으로 보이지 않는다.
+LINE_SPACING = 160
+
+# 최상위 항목(1. 2. 3. …) 사이에는 빈 줄이 들어간다
+TOP_ITEM = re.compile(r"^\s*\d+\.\s")
 
 # 결재란 지오메트리(HWPUNIT, 1pt=100) — 실제 시행문 PDF 좌표 실측
 COL_TITLE = 5200   # 직위칸 52pt
@@ -248,8 +257,14 @@ def build_section(meta):
     # "끝" 표시: 붙임이 없으면 본문 마지막 글자에서 2타 띄우고 "끝." (편람 규칙)
     if kkeut and not 붙임 and body:
         body[-1] = body[-1] + "  끝."
+    prev = ""
     for line in body:
+        # 최상위 항목끼리 붙여 쓰면 문단 구분이 안 보인다. 이미 빈 줄을
+        # 넣어 뒀으면 겹쳐 넣지 않는다.
+        if TOP_ITEM.match(line) and prev.strip() and meta.get("항목간_빈줄", True):
+            P.append(_empty())
         P.append(_p(PP_BODY, [(CP_BODY, line)]))
+        prev = line
 
     # 붙임 — 쌍점(:) 없이 1자 여백, 1건이면 번호 생략, 끝은 붙임 끝에 2타 띄움
     if 붙임:
@@ -306,16 +321,36 @@ def set_prvtext(path):
     os.replace(tmp, str(path))
 
 
+def _header_for(meta, output):
+    """본문 줄간격이 기본값과 다르면 header.xml 사본을 만들어 쓴다."""
+    spacing = int(meta.get("줄간격") or LINE_SPACING)
+    if spacing == LINE_SPACING:
+        return GONMUN2025_HEADER, None
+    x = GONMUN2025_HEADER.read_text(encoding="utf-8")
+    m = re.search(r'<hh:paraPr id="%s".*?</hh:paraPr>' % PP_BODY, x, re.DOTALL)
+    body_pr = m.group(0)
+    fixed = body_pr.replace(f'<hh:lineSpacing type="PERCENT" value="{LINE_SPACING}"',
+                            f'<hh:lineSpacing type="PERCENT" value="{spacing}"')
+    if fixed == body_pr:
+        raise SystemExit(f"줄간격을 바꿀 자리를 찾지 못했다(paraPr {PP_BODY})")
+    tmp = Path(output).with_suffix(".header.tmp.xml")
+    tmp.write_text(x[:m.start()] + fixed + x[m.end():], encoding="utf-8")
+    return tmp, tmp
+
+
 def generate(meta, output):
     section_xml = build_section(meta)
     tmp_sec = Path(output).with_suffix(".section.tmp.xml")
     tmp_sec.write_text(section_xml, encoding="utf-8")
+    header, tmp_hdr = _header_for(meta, output)
     subprocess.run([sys.executable, str(SKILL_DIR / "scripts/build_hwpx.py"),
-                    "--header", str(GONMUN2025_HEADER), "--section", str(tmp_sec),
+                    "--header", str(header), "--section", str(tmp_sec),
                     "--title", meta.get("제목", "기안문"), "--output", str(output)], check=True)
     subprocess.run([sys.executable, str(SKILL_DIR / "scripts/fix_namespaces.py"), str(output)], check=True)
     set_prvtext(output)
     tmp_sec.unlink(missing_ok=True)
+    if tmp_hdr:
+        tmp_hdr.unlink(missing_ok=True)
     return output
 
 

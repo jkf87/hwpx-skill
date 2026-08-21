@@ -1057,6 +1057,10 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/verify_hwpx.py" \
 > **결재란은 테두리 없는 표**(직위칸 52pt + 서명칸 65pt, 서명칸 위에 결재일자 8pt)다.
 > 지오메트리는 실제 시행문 PDF 좌표를 실측해 맞춘 값이다.
 >
+> **본문 줄간격은 160%**(편람 표기 103%로 짜면 본문이 눌려 붙어 공문으로 보이지
+> 않는다). 최상위 항목 `1./2./3.` 사이에는 빈 줄이 자동으로 들어간다.
+> 각각 `"줄간격": 130`, `"항목간_빈줄": false` 로 바꿀 수 있다.
+>
 > ```bash
 > python3 scripts/gonmun.py --sample --output 기안문.hwpx        # 샘플
 > python3 scripts/gonmun.py --input gonmun.json --output out.hwpx  # JSON 입력

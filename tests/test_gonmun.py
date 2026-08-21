@@ -6,6 +6,7 @@
 """
 import subprocess
 import sys
+import re
 import tempfile
 import xml.dom.minidom as minidom
 import zipfile
@@ -90,6 +91,42 @@ for _pp in (gonmun.PP_RULE_HEAD, gonmun.PP_RULE_GRAY, gonmun.PP_RULE_BLACK):
 check("구분선 borderFill이 아래 테두리만 SOLID",
       '<hh:borderFill id="5"' in _hdr and '<hh:borderFill id="6"' in _hdr)
 check("secPr 포함(첫 문단)", "<hp:secPr" in section)
+
+# ── 줄간격 / 항목 사이 빈 줄 ──
+_hdr = gonmun.GONMUN2025_HEADER.read_text(encoding="utf-8")
+_body_pr = re.search(r'<hh:paraPr id="%s".*?</hh:paraPr>' % gonmun.PP_BODY, _hdr, re.S).group(0)
+check(f"본문 줄간격 기본 {gonmun.LINE_SPACING}%",
+      f'value="{gonmun.LINE_SPACING}"' in _body_pr and 'value="103"' not in _body_pr)
+
+def _paras(sec):
+    return [re.sub(r"<[^>]+>", "", p)
+            for p in re.findall(r"<hp:p id=\"\d+\" paraPrIDRef.*?</hp:p>", sec, re.S)]
+
+_items = {"기관명": "가", "수신": "나", "제목": "다", "발신명의": "라",
+          "body": ["1. 첫째 항목", "2. 둘째 항목", "  가. 하위 항목", "3. 셋째 항목"]}
+_txt = _paras(gonmun.build_section(_items))
+_i2 = _txt.index("2. 둘째 항목")
+check("최상위 항목 앞에 빈 줄", _txt[_i2 - 1].strip() == "")
+check("하위 항목 앞에는 빈 줄 없음",
+      _txt[_txt.index("  가. 하위 항목") - 1].strip() == "2. 둘째 항목")
+check("첫 항목 앞에는 빈 줄을 겹쳐 넣지 않는다",
+      _paras(gonmun.build_section({**_items, "body": ["", "1. 첫째"]})).count("") ==
+      _paras(gonmun.build_section({**_items, "body": ["1. 첫째"]})).count("") + 1)
+_off = _paras(gonmun.build_section({**_items, "항목간_빈줄": False}))
+check("항목간_빈줄=False면 빈 줄 없음",
+      _off[_off.index("2. 둘째 항목") - 1].strip() == "1. 첫째 항목")
+
+# 줄간격 override — header.xml 사본을 만들어 써야 한다
+with tempfile.TemporaryDirectory() as _d:
+    _out = Path(_d) / "s.hwpx"
+    _h, _tmp = gonmun._header_for({"줄간격": 130}, _out)
+    _pr = re.search(r'<hh:paraPr id="%s".*?</hh:paraPr>' % gonmun.PP_BODY,
+                    _h.read_text(encoding="utf-8"), re.S).group(0)
+    check("줄간격 130 지정 시 사본 헤더에 반영", 'value="130"' in _pr)
+    check("원본 header.xml은 그대로", _h != gonmun.GONMUN2025_HEADER and _tmp is not None)
+    _h2, _tmp2 = gonmun._header_for({}, _out)
+    check("줄간격 미지정이면 원본 헤더 사용",
+          _h2 == gonmun.GONMUN2025_HEADER and _tmp2 is None)
 check("여백 좌우 20mm(5669)로 표준화", 'left="5669" right="5669"' in section)
 
 # 끝 처리: 붙임 없을 때 본문 마지막에 "끝."
