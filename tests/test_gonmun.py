@@ -45,15 +45,50 @@ check("두문: 행정기관명 포함", "행정안전부" in section)
 check("두문: 수신 라벨", "수신  " in section)
 check("두문: 제목 라벨", "제목  " in section)
 check("결문: 발신명의(행정안전부장관)", "행정안전부장관" in section)
-check("결문: 기안자·검토자·결재권자 한 줄", "기안자" in section and "검토자" in section and "결재권자" in section)
+check("결문: 결재란이 표(직위/성명 두 열)", "<hp:tbl" in section
+      and 'colCnt="6"' in section and "주무관" in section and "홍길동" in section)
+check("결재란 칸 너비 실측값(직위 52pt + 서명 65pt)",
+      f'width="{gonmun.COL_TITLE}"' in section and f'width="{gonmun.COL_SIGN}"' in section)
+check("결재란 표는 테두리 없음", f'borderFillIDRef="{gonmun.BF_NONE}"' in section)
+check("결재일자는 8pt charPr", f'charPrIDRef="{gonmun.CP_DATE}"' in section
+      and "2026. 6. 22." in section)
 check("결문: 시행/접수", "시행  " in section and "접수  " in section)
 check("결문: 우편번호·홈페이지", "우 30112" in section and "www.mois.go.kr" in section)
-check("결문: 전화/전송/이메일/공개", "전화 " in section and "전송 " in section and "공개" in section)
+check("결문: 전화번호/팩스번호/이메일/공개", "전화번호 " in section
+      and "팩스번호 " in section and "공개" in section)
 # 라벨('붙임  ')과 값은 서로 다른 run이라 비연속 — 각각 확인. 1건이므로 '1.' 번호 없음
 check("붙임: 1건 번호 생략 + 끝",
       "붙임  " in section and "교육 계획 1부.  끝." in section and "붙임  1. " not in section)
 check("맑은고딕 본문 charPr(11) 사용", 'charPrIDRef="11"' in section)
-check("발신명의 charPr(13) 사용", 'charPrIDRef="13"' in section)
+check("발신명의 15pt charPr(실측값)", f'charPrIDRef="{gonmun.CP_SENDER}"' in section)
+check("두문 아래 구분선", f'paraPrIDRef="{gonmun.PP_RULE_HEAD}"' in section)
+check("결문 위 구분선(기본 회색)", f'paraPrIDRef="{gonmun.PP_RULE_GRAY}"' in section)
+check("텍스트 룰('─' 반복)은 더 쓰지 않는다", "──────" not in section)
+check("원훈(표어)이 맨 위", section.index("우리는 국민이") < section.index("행정안전부장관"))
+
+# 결문선 변형 — 편람 표준 검정 실선
+sec_black = gonmun.build_section({**gonmun.SAMPLE, "결문선": "검정"})
+check("결문선 '검정' 지정 시 검정 실선 문단", f'paraPrIDRef="{gonmun.PP_RULE_BLACK}"' in sec_black
+      and f'paraPrIDRef="{gonmun.PP_RULE_GRAY}"' not in sec_black)
+
+# 예전 필드명(기안자/검토자/결재권자, 전화/전송)으로도 동작해야 한다
+legacy = {k: v for k, v in gonmun.SAMPLE.items() if k not in ("결재", "전화번호", "팩스번호")}
+legacy.update({"기안자": "주무관 홍길동", "검토자": "과장 김영희",
+               "결재권자": "국장 이철수", "전화": "044-205-2345", "전송": "044-205-8910"})
+sec_legacy = gonmun.build_section(legacy)
+check("예전 기안자/검토자/결재권자 입력도 결재란으로",
+      "<hp:tbl" in sec_legacy and "홍길동" in sec_legacy and "주무관" in sec_legacy)
+check("예전 전화/전송 입력도 전화번호/팩스번호로",
+      "전화번호 044-205-2345" in sec_legacy and "팩스번호 044-205-8910" in sec_legacy)
+
+# 새 스타일 ID가 header.xml에 실제로 있어야 한다 — 없으면 한컴이 파일을 못 연다
+_hdr = gonmun.GONMUN2025_HEADER.read_text(encoding="utf-8")
+for _cp in (gonmun.CP_SENDER, gonmun.CP_SIGN, gonmun.CP_DATE):
+    check(f"header.xml에 charPr {_cp} 정의", f'<hh:charPr id="{_cp}"' in _hdr)
+for _pp in (gonmun.PP_RULE_HEAD, gonmun.PP_RULE_GRAY, gonmun.PP_RULE_BLACK):
+    check(f"header.xml에 paraPr {_pp} 정의", f'<hh:paraPr id="{_pp}"' in _hdr)
+check("구분선 borderFill이 아래 테두리만 SOLID",
+      '<hh:borderFill id="5"' in _hdr and '<hh:borderFill id="6"' in _hdr)
 check("secPr 포함(첫 문단)", "<hp:secPr" in section)
 check("여백 좌우 20mm(5669)로 표준화", 'left="5669" right="5669"' in section)
 
@@ -82,6 +117,13 @@ clean = ("1. 관련: 정보공개제도과-1000(2026. 6. 1.)\n"
          "  가. 일시: 2026. 7. 10.(금) 14:00∼17:00\n"
          "붙임  교육 계획 1부.  끝.\n")
 res2 = gonmun_lint.lint_text(clean)
+check("위반 탐지: DATE_KOREAN",
+      any(f["rule"] == "DATE_KOREAN"
+          for f in gonmun_lint.lint_text("일시: 2026년 8월 25일(화)")["findings"]))
+# 결문 홈페이지 주소의 '://' 는 쌍점 규칙 대상이 아니다
+_url = gonmun_lint.lint_text("우 41068  대구광역시 동구 첨단로, 53  /  http://www.nia.or.kr/")
+check("URL '://' 오탐 없음",
+      not any(f["rule"] == "COLON_SPACE" for f in _url["findings"]))
 check("정상문 오탐 없음(error 0)", res2["summary"].get("error", 0) == 0,
       detail=str([f["rule"] for f in res2["findings"]]))
 
