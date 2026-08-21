@@ -102,6 +102,33 @@ def main():
     check(run(FILL, "check", out3, "--strict").returncode == 0,
           "초장문 결과가 strict 통과")
 
+    # ── 마크다운 굵게가 별표로 새지 않는가 (실사용에서 10곳 발생) ──
+    emd = tmp / "e.md"
+    emd.write_text("# 제목\n## Ⅰ. 장\n"
+                   "ㅇ 본문에 **강조** 가 있다\n"
+                   "| 구분 | 내용 |\n| --- | --- |\n"
+                   "| **AI 인프라** | 설명 |\n| 데이터 | **중요** |\n",
+                   encoding="utf-8")
+    oute = tmp / "emph.hwpx"
+    check(run(DS, "render", spec_dir, emd, "-o", oute).returncode == 0,
+          "굵게 포함 원고 조판됨")
+    sece = section_of(oute)
+    texts = re.findall(r"<hp:t>(.*?)</hp:t>", sece, re.S)
+    check(not any("**" in t for t in texts),
+          "별표가 글자로 남지 않음 (한글은 마크다운 렌더러가 아님)")
+    check("강조" in sece and "AI 인프라" in sece, "강조 텍스트 자체는 보존됨")
+    # 굵게 charPr 이 실제로 쓰였는지 — 본문 charPr 과 다른 id 가 등장해야 한다
+    from xml.etree import ElementTree as ET
+    with zipfile.ZipFile(oute) as z:
+        hdr = ET.fromstring(z.read("Contents/header.xml"))
+    ns = {"hh": "http://www.hancom.co.kr/hwpml/2011/head"}
+    bold_ids = {c.get("id") for c in hdr.findall(".//hh:charProperties/hh:charPr", ns)
+                if c.find("hh:bold", ns) is not None}
+    used = set(re.findall(r'charPrIDRef="(\d+)"', sece))
+    check(bool(used & bold_ids), "굵게 charPr 이 실제로 적용됨(별표만 지운 게 아님)")
+    check(run(FILL, "check", oute, "--strict").returncode == 0,
+          "굵게 결과가 strict 통과")
+
     # ── 원본 문구가 섞여 나오지 않는가 ──
     mp = ROOT / "scripts" / "map_preflight.py"
     r = run(mp, "residue", out, "--against", REF)

@@ -224,6 +224,67 @@ def esc(t: str) -> str:
     return (t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+EMPH = re.compile(r"\*\*(.+?)\*\*")
+
+
+def build_bold_map(base: Path) -> dict:
+    """charPr → '같은 글꼴의 굵게 charPr' 대응표.
+
+    한글은 마크다운 렌더러가 아니라, `**굵게**` 를 그대로 흘려보내면 별표가
+    글자로 박힌다(실사용에서 10곳 발생). 그래서 굵게 짝을 찾아 런을 나눈다.
+    정확히 같은 (글꼴,크기,색) 짝은 드물어(실측 11종) 단계적으로 폴백한다.
+    """
+    from xml.etree import ElementTree as ET
+    ns = {"hh": "http://www.hancom.co.kr/hwpml/2011/head"}
+    with zipfile.ZipFile(base) as z:
+        root = ET.fromstring(z.read("Contents/header.xml"))
+    chars = []
+    for c in root.findall(".//hh:charProperties/hh:charPr", ns):
+        fr = c.find("hh:fontRef", ns)
+        chars.append({
+            "id": c.get("id"),
+            "font": fr.get("hangul") if fr is not None else "?",
+            "h": c.get("height"),
+            "color": c.get("textColor"),
+            "bold": c.find("hh:bold", ns) is not None,
+        })
+    bolds = [c for c in chars if c["bold"]]
+    out = {}
+    for c in chars:
+        if c["bold"]:
+            out[c["id"]] = c["id"]
+            continue
+        for pred in (lambda b: b["font"] == c["font"] and b["h"] == c["h"]
+                     and b["color"] == c["color"],
+                     lambda b: b["font"] == c["font"] and b["h"] == c["h"],
+                     lambda b: b["font"] == c["font"]):
+            hit = next((b["id"] for b in bolds if pred(b)), None)
+            if hit:
+                out[c["id"]] = hit
+                break
+    return out
+
+
+def emphasis_runs(text: str, char_id: str, bold_map: dict | None) -> str:
+    """`**굵게**` 를 런으로 쪼갠다. 굵게 짝이 없으면 별표만 제거한다."""
+    bold_id = (bold_map or {}).get(char_id)
+    if "**" not in text:
+        return f'<hp:run charPrIDRef="{char_id}"><hp:t>{esc(text)}</hp:t></hp:run>'
+    if not bold_id:
+        return (f'<hp:run charPrIDRef="{char_id}">'
+                f"<hp:t>{esc(EMPH.sub(r'\1', text))}</hp:t></hp:run>")
+    parts, pos = [], 0
+    for m in EMPH.finditer(text):
+        if m.start() > pos:
+            parts.append((text[pos:m.start()], char_id))
+        parts.append((m.group(1), bold_id))
+        pos = m.end()
+    if pos < len(text):
+        parts.append((text[pos:], char_id))
+    return "".join(f'<hp:run charPrIDRef="{cid}"><hp:t>{esc(seg)}</hp:t></hp:run>'
+                   for seg, cid in parts if seg)
+
+
 def strip_linesegs(xml: str) -> str:
     """줄배치 캐시를 제거한다. 한컴이 열 때 다시 계산하므로 내용 길이가
     달라져도 레이아웃이 어긋나지 않는다 — 이 도구의 핵심."""
@@ -252,9 +313,17 @@ def spans(frag: str, tag: str):
     return out
 
 
-def set_text(frag: str, text: str) -> str:
-    """조각 안의 첫 <hp:t> 에 텍스트를 넣고 나머지는 비운다.
-    첫 run 의 서식(charPr)이 유지된다."""
+def set_text(frag: str, text: str, bold_map: dict | None = None) -> str:
+    """조각의 첫 문단 텍스트를 갈아끼운다. `**굵게**` 는 런을 나눠 처리한다."""
+    if "**" in text:
+        m = re.search(r'<hp:run\b[^>]*charPrIDRef="(\d+)"[^>]*>', frag)
+        if m:
+            runs = emphasis_runs(text, m.group(1), bold_map)
+            first = m.start()
+            last = frag.rfind("</hp:run>")
+            if last > first:
+                return frag[:first] + runs + frag[last + len("</hp:run>"):]
+        text = EMPH.sub(r"\1", text)          # 런을 못 찾으면 별표만 제거
     done = [False]
 
     def rep(m):
@@ -269,7 +338,7 @@ def set_text(frag: str, text: str) -> str:
     return out
 
 
-def fill_cells(frag: str, values: list) -> str:
+def fill_cells(frag: str, values: list, bold_map: dict | None = None) -> str:
     """표 조각의 셀에 순서대로 값을 넣는다. None 이면 그대로 둔다."""
     cells = spans(frag, "tc")
     out = frag
@@ -277,11 +346,12 @@ def fill_cells(frag: str, values: list) -> str:
         if i >= len(values) or values[i] is None:
             continue
         st, en = cells[i]
-        out = out[:st] + set_text(out[st:en], values[i]) + out[en:]
+        out = out[:st] + set_text(out[st:en], values[i], bold_map) + out[en:]
     return out
 
 
-def fill_cell_paragraphs(frag: str, cell_idx: int, lines: list) -> str:
+def fill_cell_paragraphs(frag: str, cell_idx: int, lines: list,
+                         bold_map: dict | None = None) -> str:
     """한 셀의 문단들을 프로토타입 복제로 갈아끼운다(줄 수 = 내용 수)."""
     cells = spans(frag, "tc")
     if cell_idx >= len(cells):
@@ -292,7 +362,8 @@ def fill_cell_paragraphs(frag: str, cell_idx: int, lines: list) -> str:
     if not inner_paras:
         return frag
     proto = cell[inner_paras[0][0]:inner_paras[0][1]]
-    built = "".join(set_text(proto, ln) for ln in lines) or set_text(proto, "")
+    built = "".join(set_text(proto, ln, bold_map) for ln in lines) \
+        or set_text(proto, "")
     new_cell = cell[:inner_paras[0][0]] + built + cell[inner_paras[-1][1]:]
     return frag[:st] + new_cell + frag[en:]
 
@@ -418,14 +489,15 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
     def T(name):
         return strip_linesegs((tpl / name).read_text(encoding="utf-8"))
 
+    bold_map = build_bold_map(base)
+
     def para(kind: str, text: str) -> str:
         lv = spec["levels"].get(kind) or spec["levels"].get("plain")
         if lv is None:
             lv = {"paraPr": "0", "charPr": "0"}
         return (f'<hp:p id="0" paraPrIDRef="{lv["paraPr"]}" styleIDRef="0" '
                 f'pageBreak="0" columnBreak="0" merged="0">'
-                f'<hp:run charPrIDRef="{lv["charPr"]}">'
-                f"<hp:t>{esc(text)}</hp:t></hp:run></hp:p>")
+                f'{emphasis_runs(text, lv["charPr"], bold_map)}</hp:p>')
 
     parts = [T(spec["page"]["template"])]                  # 페이지 설정 문단
     used = Counter()
@@ -446,21 +518,21 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
     for b in parse_content(content.read_text(encoding="utf-8")):
         t = b["type"]
         if t == "cover" and cover_t:
-            parts.append(fill_cells(T(cover_t), [None, b["title"], None]))
+            parts.append(fill_cells(T(cover_t), [None, b["title"], None], bold_map))
         elif t == "chapter" and chap_t:
-            parts.append(fill_cells(T(chap_t), [b["title"]]))
+            parts.append(fill_cells(T(chap_t), [b["title"]], bold_map))
         elif t == "section" and sect_t:
-            parts.append(fill_cells(T(sect_t), [b["num"], None, b["title"]]))
+            parts.append(fill_cells(T(sect_t), [b["num"], None, b["title"]], bold_map))
         elif t == "titled_box" and titled_t:
             frag = T(titled_t)
             cells = spans(frag, "tc")
             body_idx = max(range(len(cells)),
                            key=lambda i: len(text_of(frag[cells[i][0]:cells[i][1]])))
             frag = fill_cells(frag, [b["title"] if i == 1 else None
-                                     for i in range(len(cells))])
-            parts.append(fill_cell_paragraphs(frag, body_idx, b["body"]))
+                                     for i in range(len(cells))], bold_map)
+            parts.append(fill_cell_paragraphs(frag, body_idx, b["body"], bold_map))
         elif t == "table" and table_t and b["rows"]:
-            parts.append(build_table(T(table_t), b["rows"]))
+            parts.append(build_table(T(table_t), b["rows"], bold_map))
         elif t == "image":
             obj = spec.get("objects", {}).get("image")
             src = (content.parent / b["path"]).expanduser()
@@ -480,7 +552,7 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
             txt = b["text"]
             kind = classify(txt.strip())
             if kind == "arrow" and callout_t:
-                parts.append(fill_cells(T(callout_t), [txt.strip()]))
+                parts.append(fill_cells(T(callout_t), [txt.strip()], bold_map))
             else:
                 parts.append(para(kind, txt))
         used[t] += 1
@@ -491,7 +563,7 @@ def render(specdir: Path, content: Path, out: Path) -> dict:
             "images": [i for i, _ in new_images]}
 
 
-def build_table(frag: str, rows: list) -> str:
+def build_table(frag: str, rows: list, bold_map: dict | None = None) -> str:
     """표를 내용 크기(행×열)에 맞춰 다시 조립한다.
 
     원본 일정표는 '분야' 라벨 칸이 세로 병합돼 있다. 그 행을 그대로 복제하면
@@ -532,7 +604,7 @@ def build_table(frag: str, rows: list) -> str:
     cell_w = total_w // ncol if total_w else 0
 
     def make_cell(proto, text, col, row):
-        c = set_text(proto, text)
+        c = set_text(proto, text, bold_map)
         c = re.sub(r'<hp:cellAddr colAddr="\d+" rowAddr="\d+"/>',
                    f'<hp:cellAddr colAddr="{col}" rowAddr="{row}"/>', c)
         c = re.sub(r'<hp:cellSpan colSpan="\d+" rowSpan="\d+"/>',
