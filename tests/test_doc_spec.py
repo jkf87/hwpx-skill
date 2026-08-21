@@ -281,6 +281,34 @@ def main():
     check(run(FILL, "check", outs, "--strict").returncode == 0,
           "표지·목차 결과가 strict 통과")
 
+    # ── 레퍼런스에 서식이 없어도 내용을 잃지 않는가 ──
+    # 표지·장·절 배너가 없는 레퍼런스로 조판하면 제목이 통째로 사라지던 사고
+    import importlib.util as _il
+    sp2 = _il.spec_from_file_location("ds2", DS)
+    ds2 = _il.module_from_spec(sp2)
+    sp2.loader.exec_module(ds2)
+
+    bare = tmp / "bare"          # 배너·표 템플릿을 지운 반쪽 spec
+    import shutil as _sh
+    _sh.copytree(spec_dir, bare)
+    bspec = json.loads((bare / "spec.json").read_text(encoding="utf-8"))
+    bspec["banners"], bspec["tables"], bspec["blocks"] = {}, {}, {}
+    (bare / "spec.json").write_text(json.dumps(bspec, ensure_ascii=False),
+                                    encoding="utf-8")
+    bmd = tmp / "bare.md"
+    bmd.write_text("# 표지제목ABC\n## Ⅰ. 장제목DEF\n### 1 절제목GHI\n"
+                   "- 본문 항목\n| 가 | 나 |\n| --- | --- |\n| 1 | 2 |\n",
+                   encoding="utf-8")
+    outb2 = tmp / "bare.hwpx"
+    r = run(DS, "render", bare, bmd, "-o", outb2)
+    check(r.returncode == 0, "서식 없는 레퍼런스로도 조판됨")
+    sb = section_of(outb2)
+    for word in ("표지제목ABC", "장제목DEF", "절제목GHI"):
+        check(word in sb, f"'{word}' 가 유실되지 않음")
+    check("대체함" in r.stderr, "대체 사실을 경고로 알림")
+    check(run(FILL, "check", outb2, "--strict").returncode == 0,
+          "대체 조판 결과도 strict 통과")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

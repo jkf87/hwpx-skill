@@ -602,6 +602,7 @@ def render(specdir: Path, content: Path, out: Path,
     parts = [T(spec["page"]["template"])]                  # 페이지 설정 문단
     used = Counter()
     new_images: list[tuple[str, Path]] = []                # (item_id, 파일경로)
+    fallbacks: Counter = Counter()      # 템플릿이 없어 일반 문단으로 대체한 블록
 
     banners = spec.get("banners", {})
     cover_t = next((v["template"] for k, v in banners.items() if k.startswith("banner_3x")), None)
@@ -641,14 +642,31 @@ def render(specdir: Path, content: Path, out: Path,
 
     for b in blocks:
         t = b["type"]
-        if t == "cover" and cover_t:
-            parts.append(fill_cells(T(cover_t), [None, b["title"], None], bold_map))
-        elif t == "chapter" and chap_t:
-            frag = fill_cells(T(chap_t), [b["title"]], bold_map)
-            parts.append(widen_banner(frag, 0, b["title"], body_w, heights))
-        elif t == "section" and sect_t:
-            frag = fill_cells(T(sect_t), [b["num"], None, b["title"]], bold_map)
-            parts.append(widen_banner(frag, 2, b["title"], body_w, heights))
+        if t == "cover":
+            # 레퍼런스에 그 서식이 없으면 버리지 말고 문단으로라도 살린다.
+            # 조용히 건너뛰면 제목·장·절이 통째로 사라진다(실측).
+            if cover_t:
+                parts.append(fill_cells(T(cover_t), [None, b["title"], None],
+                                        bold_map))
+            else:
+                parts.append(para("plain", b["title"]))
+                fallbacks[t] += 1
+        elif t == "chapter":
+            if chap_t:
+                frag = fill_cells(T(chap_t), [b["title"]], bold_map)
+                parts.append(widen_banner(frag, 0, b["title"], body_w, heights))
+            else:
+                parts.append(para("h_square", b["title"]))
+                fallbacks[t] += 1
+        elif t == "section":
+            if sect_t:
+                frag = fill_cells(T(sect_t), [b["num"], None, b["title"]],
+                                  bold_map)
+                parts.append(widen_banner(frag, 2, b["title"], body_w, heights))
+            else:
+                num = f'{b["num"]} ' if b.get("num") else ""
+                parts.append(para("h_square", f'{num}{b["title"]}'))
+                fallbacks[t] += 1
         elif t == "titled_box" and titled_t:
             frag = T(titled_t)
             cells = spans(frag, "tc")
@@ -657,8 +675,14 @@ def render(specdir: Path, content: Path, out: Path,
             frag = fill_cells(frag, [b["title"] if i == 1 else None
                                      for i in range(len(cells))], bold_map)
             parts.append(fill_cell_paragraphs(frag, body_idx, b["body"], bold_map))
-        elif t == "table" and table_t and b["rows"]:
-            parts.append(build_table(T(table_t), b["rows"], bold_map, heights))
+        elif t == "table" and b["rows"]:
+            if table_t:
+                parts.append(build_table(T(table_t), b["rows"], bold_map,
+                                         heights))
+            else:                       # 표 템플릿이 없으면 줄글로라도 남긴다
+                for row in b["rows"]:
+                    parts.append(para("dash", " | ".join(row)))
+                fallbacks[t] += 1
         elif t == "image":
             obj = spec.get("objects", {}).get("image")
             src = (content.parent / b["path"]).expanduser()
@@ -700,7 +724,8 @@ def render(specdir: Path, content: Path, out: Path,
     section = head + renumber(body) + tail
     build_package(base, out, section, new_images)
     return {"blocks": dict(used), "out": str(out),
-            "images": [i for i, _ in new_images]}
+            "images": [i for i, _ in new_images],
+            "fallbacks": dict(fallbacks)}
 
 
 def build_table(frag: str, rows: list, bold_map: dict | None = None,
@@ -851,6 +876,11 @@ def cmd_render(a) -> int:
                org=getattr(a, "org", ""), date=getattr(a, "date", ""))
     print(f"조판 완료 → {r['out']}")
     print(f"  블록: {r['blocks']}")
+    if r.get("fallbacks"):
+        print(f"  [주의] 레퍼런스에 해당 서식이 없어 일반 문단으로 대체함: "
+              f"{r['fallbacks']}", file=sys.stderr)
+        print("         내용은 보존되지만 원본 서식과 다르게 보인다. 그 서식을 "
+              "가진 레퍼런스를 쓰는 편이 낫다.", file=sys.stderr)
     q = lint_document(Path(a.out))          # 조판 직후 자동 검문
     for e in q["errors"]:
         print(f"  [오류] {e}", file=sys.stderr)
