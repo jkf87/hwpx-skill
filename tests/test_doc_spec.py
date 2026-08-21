@@ -225,6 +225,16 @@ def main():
     check(len(set(hs)) > 1, "행 높이가 내용에 따라 달라짐(일괄 복제 아님)")
     check(run(DS, "lint", outt).returncode == 0, "긴 칸 표도 품질 검문 통과")
 
+    # ── 기관마다 다른 마커 기호를 같은 층위로 인식하는가 ──
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("ds", DS)
+    ds = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(ds)
+    check(ds.classify("○ (개요) 내용") == ds.classify("ㅇ 내용"),
+          "'○'(흰 원)과 'ㅇ'(한글 이응)을 같은 층위로 인식")
+    check(ds.classify("▶ 항목") == "tri" and ds.classify("＊ 각주") == "note",
+          "다른 기관 표기(▶, ＊)도 인식")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

@@ -35,16 +35,21 @@ INNER_TAG = re.compile(r"<[^>]*>")
 T_RE = re.compile(r"<hp:t>(.*?)</hp:t>", re.S)
 
 # 문서 계층 마커 — 행정 문서의 표준 8단계에서 실제로 쓰이는 것들
+# 기관마다 같은 층위에 다른 기호를 쓴다. 'ㅇ'(한글 이응)과 '○'(흰 원)은
+# 눈으로는 같아 보이지만 다른 문자다 — 한쪽만 알면 계층이 통째로 뭉개진다.
 MARKERS = [
-    ("h_square", "□"),
-    ("bullet", "ㅇ"),
-    ("arrow", "⇒"),
-    ("record", "￭"),
-    ("tri", "▸"),
-    ("note_ref", "※"),
-    ("dash", "-"),
-    ("note", "*"),
+    ("h_square", ("□", "▪", "■")),
+    ("bullet", ("ㅇ", "○", "◦", "●")),
+    ("arrow", ("⇒", "→", "➡")),
+    ("record", ("￭", "▣")),
+    ("tri", ("▸", "▶", "►")),
+    ("note_ref", ("※",)),
+    ("dash", ("-", "–", "‐")),
+    ("note", ("*", "＊")),
 ]
+
+# 층위 이름 → 대표 기호(조판 시 기본값)
+MARKER_MAIN = {name: alts[0] for name, alts in MARKERS}
 
 
 def text_of(frag: str) -> str:
@@ -73,8 +78,8 @@ def iter_blocks(inner: str):
 
 def classify(text: str) -> str:
     s = text.lstrip()
-    for name, mk in MARKERS:
-        if s.startswith(mk):
+    for name, alts in MARKERS:
+        if s.startswith(alts):
             return name
     if re.match(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+\s*\.", s):
         return "chapter"
@@ -148,7 +153,7 @@ def analyze(ref: Path, outdir: Path) -> dict:
     for kind, combos in per_level.items():
         (pp, cp), n = combos.most_common(1)[0]
         spec["levels"][kind] = {
-            "marker": dict(MARKERS).get(kind, ""),
+            "marker": MARKER_MAIN.get(kind, ""),
             "paraPr": pp, "charPr": cp,
             "count": sum(combos.values()),
             "variants": len(combos),
