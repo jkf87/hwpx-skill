@@ -24,7 +24,7 @@ python scripts/one_shot.py spec.json --report quality.json
 지원 유형은 `official-letter`, `brief-report`, `plan-report`, `markdown`입니다.
 v1 원고/공문 입력과 v2 의미 블록·사실 계약·편집 가능한 표 도식을 지원합니다.
 계약은 `schemas/one-shot.schema.json`, 설명은 `references/one-shot.md`에 있습니다.
-실제 페이지는 `render_hwpx.py`로 한컴 PDF/PNG를 생성해 확인합니다. 모델 간 품질 일관성은 별도 실측이 필요합니다.
+실제 페이지는 `render_hwpx.py`로 한컴 PDF를 생성해 확인합니다(Poppler가 있으면 PNG도 생성). 모델 간 품질 일관성은 별도 실측이 필요합니다.
 
 ## 아스트라(Astra) 지원
 
@@ -72,7 +72,7 @@ python3 scripts/map_preflight.py residue out.hwpx --against base.hwpx
 # 기본 의존성
 pip install python-hwpx lxml --break-system-packages
 
-# 원샷 v1/v2 생성·계약 검사 (Windows 한컴 연결 포함)
+# 원샷 v1/v2 생성·계약 검사 + 읽기·텍스트 추출 (Windows 한컴 연결 포함)
 pip install -r requirements-one-shot.txt
 
 # HWP→HWPX 변환 (워크플로우 H)

@@ -1,4 +1,5 @@
 lxml>=4.9
+python-hwpx>=6.10
 jsonschema>=4.18
 Pillow>=10
 pywin32>=306; sys_platform == "win32"
