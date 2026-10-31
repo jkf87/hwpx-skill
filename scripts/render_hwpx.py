@@ -35,18 +35,6 @@ def render_document(source: Path, output: Path, expected_pages=None) -> dict:
             "render output directory must be new or empty; preserve earlier evidence"
         )
     poppler = shutil.which("pdftoppm")
-    if not poppler:
-        return {
-            "ok": False,
-            "status": "not_run",
-            "message": "pdftoppm unavailable",
-            "visual_review": {"status": "not_run"},
-            **(
-                {"page_count_check": page_count_check(expected_pages)}
-                if expected_pages is not None
-                else {}
-            ),
-        }
     output.mkdir(parents=True, exist_ok=True)
     pdf = output / "document.pdf"
     report = run_hancom(source, pdf=pdf)
@@ -56,18 +44,25 @@ def render_document(source: Path, output: Path, expected_pages=None) -> dict:
         visual_review={"status": "not_run", "ok": None},
     )
     if report["ok"]:
-        subprocess.run(
-            [poppler, "-scale-to", "1600", "-png", str(pdf), str(output / "page")],
-            check=True,
-            capture_output=True,
-            timeout=45,
-        )
-        report["page_images"] = [str(p) for p in sorted(output.glob("page-*.png"))]
         report["pdf_sha256"] = hashlib.sha256(pdf.read_bytes()).hexdigest()
-        report["ok"] = bool(report["page_images"])
+        if poppler:
+            subprocess.run(
+                [poppler, "-scale-to", "1600", "-png", str(pdf), str(output / "page")],
+                check=True,
+                capture_output=True,
+                timeout=45,
+            )
+            report["page_images"] = [str(p) for p in sorted(output.glob("page-*.png"))]
+            report["ok"] = bool(report["page_images"])
+        else:
+            report["page_images"] = []
+            report["page_images_status"] = "not_run"
+            report["message"] = "PDF exported; pdftoppm unavailable, so no PNG pages."
     report["render_ok"] = report["ok"]
     if expected_pages is not None:
-        actual = len(report["page_images"]) if report["render_ok"] else None
+        actual = None
+        if report["render_ok"]:
+            actual = len(report["page_images"]) if poppler else report.get("pages")
         report["page_count_check"] = page_count_check(expected_pages, actual)
         if actual is not None and actual != expected_pages:
             report.update(

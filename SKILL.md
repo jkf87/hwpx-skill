@@ -64,7 +64,7 @@ python scripts/one_shot.py /absolute/path/spec.json --report /absolute/path/qual
 python scripts/render_hwpx.py /absolute/path/output.hwpx --output-dir /absolute/path/new-empty-review-folder --expected-pages 1
 ```
 
-독립 한컴 인스턴스에서 열고 PDF 및 PNG로 내보낸다(Poppler가 없어도 한컴 네이티브 기능으로 자동 내보냄). 모든 페이지의 제목 계층, 잘림·겹침, 연결 라벨, 표 분할, 불필요한 빈 페이지를 `view_file`로 직접 시각 검토(Visual QA)한다. 긴 라벨은 내용을 삭제하기보다 배치·방향·칸 크기를 조정하고 다시 검증한다.
+독립 한컴 인스턴스에서 열고 PDF로 내보낸 뒤 Poppler(`pdftoppm`)로 PNG를 만든다. Poppler가 없으면 PDF와 쪽수만 만들고 `page_images_status: not_run`으로 표시하므로 PDF를 직접 확인한다. 모든 페이지의 제목 계층, 잘림·겹침, 연결 라벨, 표 분할, 불필요한 빈 페이지를 `view_file`로 직접 시각 검토(Visual QA)한다. 긴 라벨은 내용을 삭제하기보다 배치·방향·칸 크기를 조정하고 다시 검증한다.
 
 - **페이지 밀림/폭발 방지**: 양식 원본의 빈 셀에 설정된 큰 `cellSz/@height`(예: 20000~30000 HWPUNIT)는 글자가 들어가면 페이지가 밀리는 주원인이다. 본문이 채워지는 셀의 높이는 1000 이하로 리셋하여 내용량에 맞게 자동 확장(auto-grow)되도록 조정한다.
 - **불필요한 빈 문단 삭제**: 표 내부나 섹션의 잔여 빈 문단(`<hp:p>`)을 정리하고 줄간격(`lineSpacing`)을 130% 수준으로 조판한다.

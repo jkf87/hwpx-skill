@@ -116,7 +116,30 @@ class SummaryQualityTests(unittest.TestCase):
                         "page_count_check"
                     ]["ok"]
                 )
-            with patch("render_hwpx.shutil.which", return_value=None):
+            with (
+                patch("render_hwpx.shutil.which", return_value=None),
+                patch("render_hwpx.run_hancom", side_effect=fake_hancom),
+            ):
+                result = render_hwpx.render_document(
+                    source, base / "no-poppler", expected_pages=2
+                )
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["page_images"], [])
+                self.assertEqual(result["page_images_status"], "not_run")
+                self.assertTrue((base / "no-poppler/document.pdf").is_file())
+                self.assertEqual(result["visual_review"]["status"], "not_run")
+                result = render_hwpx.render_document(
+                    source, base / "no-poppler-bad", expected_pages=1
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["page_count_check"]["actual"], 2)
+            with (
+                patch("render_hwpx.shutil.which", return_value=None),
+                patch(
+                    "render_hwpx.run_hancom",
+                    return_value={"ok": False, "status": "not_run"},
+                ),
+            ):
                 result = render_hwpx.render_document(
                     source, base / "missing", expected_pages=1
                 )
