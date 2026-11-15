@@ -16,6 +16,7 @@ import io
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 from jsonschema import Draft202012Validator
@@ -323,6 +324,19 @@ def execute_recipe(input_path, output_dir, *, argv):
     return exit_code, stdout, stderr
 
 
+def invocation_argv() -> list[str]:
+    """실행 명령을 재현 가능하게 기록한다.
+
+    3.10+ 는 sys.orig_argv 를 쓴다. 3.9 에는 없으므로 `-X utf8` 같은
+    인터프리터 옵션을 sys.flags 에서 복원한다.
+    """
+    orig = getattr(sys, "orig_argv", None)
+    if orig:
+        return list(orig)
+    flags = getattr(subprocess, "_args_from_interpreter_flags", list)()
+    return [sys.executable, *flags, *sys.argv]
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -352,7 +366,7 @@ def main():
     code, stdout, stderr = execute_recipe(
         args.content,
         args.output_dir,
-        argv=getattr(sys, "orig_argv", [sys.executable, *sys.argv]),
+        argv=invocation_argv(),
     )
     sys.stdout.write(stdout)
     sys.stderr.write(stderr)
