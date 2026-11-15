@@ -327,8 +327,9 @@ def execute_recipe(input_path, output_dir, *, argv):
 def invocation_argv() -> list[str]:
     """실행 명령을 재현 가능하게 기록한다.
 
-    3.10+ 는 sys.orig_argv 를 쓴다. macOS 프레임워크 빌드에서는 orig_argv[0] 이
-    Python.app 내부 실행 파일이라 인터프리터 경로만 sys.executable 로 맞춘다.
+    3.10+ 는 sys.orig_argv 를 쓰고 인터프리터 경로만 sys.executable 로 둔다.
+    macOS 프레임워크 빌드에서는 sys.executable 도 Python.app 내부 실행 파일일 수
+    있어서, 호출한 쪽이 넘긴 인터프리터 경로와 글자 그대로 같다고 보장하지 않는다.
     3.9 에는 orig_argv 가 없으므로 `-X utf8` 같은 인터프리터 옵션을 sys.flags 에서
     복원한다.
     """

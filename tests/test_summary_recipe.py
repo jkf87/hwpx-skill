@@ -98,7 +98,12 @@ class SummaryRecipeTests(unittest.TestCase):
                 log = json.loads(
                     (out / "execution-log.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(log["argv"], argv)
+                # argv[0] 은 인터프리터 경로라 실행 환경마다 다르다. macOS 프레임워크
+                # Python 3.12 는 bin/python 을 Python.app 안의 실행 파일로 다시 띄우므로
+                # 자식의 sys.executable 이 호출한 경로와 다르다(GitHub Actions
+                # macos-latest 실측). 인자는 그대로 비교하고 argv[0] 은 Python 인지만 본다.
+                self.assertEqual(log["argv"][1:], argv[1:])
+                self.assertTrue(Path(log["argv"][0]).name.lower().startswith("python"))
                 self.assertEqual(log["stdout"], result.stdout)
                 self.assertEqual(log["stderr"], result.stderr)
                 self.assertEqual(log["exit_code"], result.returncode)
