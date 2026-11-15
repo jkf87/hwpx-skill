@@ -1,0 +1,35 @@
+name: regression
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: python -m pip install -r requirements-one-shot.txt
+      - name: Syntax check on the oldest supported Python
+        run: python -m compileall -q scripts tests
+      - name: Regression suite
+        run: python tests/run_regression.py --output regression.json
+      - name: Keep failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-${{ matrix.os }}-py${{ matrix.python }}
+          path: regression.json
