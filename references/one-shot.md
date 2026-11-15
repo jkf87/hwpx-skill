@@ -15,7 +15,7 @@ python scripts/one_shot.py --example process-summary
 python scripts/one_shot.py /absolute/path/spec.json --report /absolute/path/quality.json
 ```
 
-예시 출력 내용을 파일 작성 도구로 JSON에 저장한다. PowerShell 버전에 따라 리다이렉션 인코딩이 다르므로 UTF-8로 저장한다. 실행 의존성은 `requirements-one-shot.txt`에 있으며, 한컴 페이지 검토에는 한컴오피스와 Poppler도 필요하다.
+예시 출력 내용을 파일 작성 도구로 JSON에 저장한다. PowerShell 버전에 따라 리다이렉션 인코딩이 다르므로 UTF-8로 저장한다. 실행 의존성은 `requirements-one-shot.txt`에 있으며, 한컴 페이지 검토에는 한컴오피스와 Poppler도 필요하다. 한컴이 없는 macOS·Linux의 근사 렌더(`render_hwpx.py --engine rhwp`)에는 Node.js와 `rsvg-convert`(macOS는 내장 `sips`로 대체 가능)가 필요하다.
 
 ## v1 호환 입력
 

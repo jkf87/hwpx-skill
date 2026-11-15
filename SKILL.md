@@ -64,7 +64,7 @@ python scripts/one_shot.py /absolute/path/spec.json --report /absolute/path/qual
 python scripts/render_hwpx.py /absolute/path/output.hwpx --output-dir /absolute/path/new-empty-review-folder --expected-pages 1
 ```
 
-독립 한컴 인스턴스에서 열고 PDF 및 PNG로 내보낸다(Poppler가 없어도 한컴 네이티브 기능으로 자동 내보냄). 모든 페이지의 제목 계층, 잘림·겹침, 연결 라벨, 표 분할, 불필요한 빈 페이지를 `view_file`로 직접 시각 검토(Visual QA)한다. 긴 라벨은 내용을 삭제하기보다 배치·방향·칸 크기를 조정하고 다시 검증한다.
+Windows에서는 독립 한컴 인스턴스에서 열고 PDF 및 PNG로 내보낸다(Poppler가 없어도 한컴 네이티브 기능으로 자동 내보냄). macOS·Linux에서는 `--engine auto`(기본)가 내장 rhwp로 쪽을 SVG·PNG로 그린다(Node.js 필요, PNG 변환은 `rsvg-convert` 또는 macOS `sips`). rhwp 결과는 리포트에 `engine: rhwp`로 남는 **근사 렌더**다. 줄바꿈·쪽 수가 한컴과 다를 수 있고, 넘친 표 셀은 한컴처럼 행이 늘지 않고 잘려 보일 수 있다. 잘림이 보이면 칸 폭·글자 크기를 계산해 실제 결함인지 확인하고, 최종 쪽 수 판정은 가능하면 한컴으로 다시 한다. 모든 페이지의 제목 계층, 잘림·겹침, 연결 라벨, 표 분할, 불필요한 빈 페이지를 `view_file`로 직접 시각 검토(Visual QA)한다. 긴 라벨은 내용을 삭제하기보다 배치·방향·칸 크기를 조정하고 다시 검증한다.
 
 - **페이지 밀림/폭발 방지**: 양식 원본의 빈 셀에 설정된 큰 `cellSz/@height`(예: 20000~30000 HWPUNIT)는 글자가 들어가면 페이지가 밀리는 주원인이다. 본문이 채워지는 셀의 높이는 1000 이하로 리셋하여 내용량에 맞게 자동 확장(auto-grow)되도록 조정한다.
 - **불필요한 빈 문단 삭제**: 표 내부나 섹션의 잔여 빈 문단(`<hp:p>`)을 정리하고 줄간격(`lineSpacing`)을 130% 수준으로 조판한다.

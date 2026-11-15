@@ -24,7 +24,7 @@ python scripts/one_shot.py spec.json --report quality.json
 지원 유형은 `official-letter`, `brief-report`, `plan-report`, `markdown`입니다.
 v1 원고/공문 입력과 v2 의미 블록·사실 계약·편집 가능한 표 도식을 지원합니다.
 계약은 `schemas/one-shot.schema.json`, 설명은 `references/one-shot.md`에 있습니다.
-실제 페이지는 `render_hwpx.py`로 한컴 PDF/PNG를 생성해 확인합니다. 모델 간 품질 일관성은 별도 실측이 필요합니다.
+실제 페이지는 `render_hwpx.py`로 한컴 PDF/PNG를 생성해 확인합니다. 한컴이 없는 macOS·Linux에서는 내장 rhwp로 근사 렌더(SVG/PNG)를 만들며, 리포트에 `engine: rhwp`로 구분됩니다. 모델 간 품질 일관성은 별도 실측이 필요합니다.
 
 ## 아스트라(Astra) 지원
 
