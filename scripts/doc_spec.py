@@ -320,8 +320,10 @@ def emphasis_runs(text: str, char_id: str, bold_map: dict | None) -> str:
     if "**" not in text:
         return f'<hp:run charPrIDRef="{char_id}"><hp:t>{esc(text)}</hp:t></hp:run>'
     if not bold_id:
+        # f-string 식 안의 백슬래시는 3.12+ 문법이라 밖에서 계산한다.
+        plain = esc(EMPH.sub(r"\1", text))
         return (f'<hp:run charPrIDRef="{char_id}">'
-                f"<hp:t>{esc(EMPH.sub(r'\1', text))}</hp:t></hp:run>")
+                f"<hp:t>{plain}</hp:t></hp:run>")
     parts, pos = [], 0
     for m in EMPH.finditer(text):
         if m.start() > pos:
